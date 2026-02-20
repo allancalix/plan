@@ -1,0 +1,35 @@
+# 1. Insert initial items
+plan log "task 1"
+plan jot "note 1"
+# 2. Simulate user opening the editor and moving items out of the inbox,
+# then deleting the inbox markers entirely.
+replace "~~~~~~~~~inbox~~~~~~~~~" "" 2026-02-19.plan
+replace "~~~~~~~~~~~~~~~~~~~~~~~" "" 2026-02-19.plan
+# 3. Insert a new item - it should safely recreate the inbox block at the bottom
+plan log "task 2"
+# 4. Show the plan file to verify the layout
+plan show
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+
+* task 1
+note 1
+
+
+---
+
+~~~~~~~~~inbox~~~~~~~~~
+* task 2
+~~~~~~~~~~~~~~~~~~~~~~~
+-- cmd_4_stdout.txt --
+2026, Feb 19 - Thursday
+
+* task 1
+note 1
+
+
+---
+
+~~~~~~~~~inbox~~~~~~~~~
+* task 2
+~~~~~~~~~~~~~~~~~~~~~~~

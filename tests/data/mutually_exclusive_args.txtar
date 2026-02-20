@@ -1,0 +1,16 @@
+# Fails when --last and a DATE are both provided
+! plan log "task" --last @~1
+! plan show today --last
+! plan --last @~1
+-- cmd_1_exit.txt --
+2
+-- cmd_1_stderr.txt --
+plan: Cannot use --last with a specific date.
+-- cmd_2_exit.txt --
+2
+-- cmd_2_stderr.txt --
+plan: Cannot use --last with a specific date.
+-- cmd_3_exit.txt --
+2
+-- cmd_3_stderr.txt --
+plan: Cannot use --last with a specific date.

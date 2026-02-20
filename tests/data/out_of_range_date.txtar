@@ -1,0 +1,13 @@
+plan log "init today file"
+! plan log "huge" @~4294967295
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* init today file
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_2_exit.txt --
+2
+-- cmd_2_stderr.txt --
+plan: Date calculation is out of bounds (too far in the past).

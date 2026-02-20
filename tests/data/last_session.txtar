@@ -1,0 +1,39 @@
+# Open `--last` on an empty directory should fail cleanly
+! plan --last
+# Add a few plan files natively
+echo "hello monday" > 2026-02-14.plan
+echo "hello wednesday" > 2026-02-16.plan
+echo "hello friday" > 2026-02-18.plan
+plan log "monday log" "5 days ago"
+plan jot "wednesday jot" "3 days ago"
+plan log "friday log" yesterday
+# Now actually run the text editor hook (will output CMD shell stdout traces on exit inside integration harness)
+plan --last
+-- 2026-02-14.plan --
+hello monday
+
+~~~~~~~~inbox~~~~~~~~
+* monday log
+~~~~~~~~~~~~~~~~~~~~~
+-- 2026-02-16.plan --
+hello wednesday
+
+~~~~~~~~inbox~~~~~~~~
+wednesday jot
+~~~~~~~~~~~~~~~~~~~~~
+-- 2026-02-18.plan --
+hello friday
+
+~~~~~~~~inbox~~~~~~~~
+* friday log
+~~~~~~~~~~~~~~~~~~~~~
+-- cmd_1_exit.txt --
+1
+-- cmd_1_stderr.txt --
+Error: No plan files found in $PLAN_DIR
+-- cmd_5_stdout.txt --
+hello friday
+
+~~~~~~~~inbox~~~~~~~~
+* friday log
+~~~~~~~~~~~~~~~~~~~~~

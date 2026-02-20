@@ -1,0 +1,226 @@
+.\" Copyright (c) 2026 Allan Calix
+.\" All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the above conditions are met.
+.\"
+.Dd February 20, 2026
+.Dt PLAN 1
+.Os
+.Sh NAME
+.Nm plan
+.Nd manage daily plan files
+.Sh SYNOPSIS
+.Nm
+.Op Fl -init Fl -dir Ar directory
+.Nm
+.Op Fl -dir Ar directory
+.Op Fl -last
+.Op Ar date
+.Nm
+.Ar command
+.Op Ar args ...
+.Sh DESCRIPTION
+.Nm
+is a command-line tool for writing and managing daily plan files.
+Each day is stored as a single plain-text file named
+.Pa YYYY-MM-DD.plan
+within a configured directory.
+.Pp
+When invoked without a subcommand,
+.Nm
+opens today's plan file in an editor.
+If the file does not yet exist, a template is created containing a
+date header and an empty inbox section.
+.Pp
+The file template has the following structure:
+.Bd -literal -offset indent
+2026, Feb 20 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+.Ed
+.Pp
+The line containing
+.Ql inbox
+surrounded by tildes marks the inbox section.
+The first plain tilde line after it closes the inbox.
+The
+.Cm log
+and
+.Cm jot
+commands insert entries between these two markers.
+If the inbox markers are missing, they are reconstructed at the end
+of the file.
+.Sh COMMANDS
+.Bl -tag -width Ds
+.It Cm log Ar text Op Ar date
+Insert a task entry into the inbox.
+The text is prefixed with
+.Ql "* "
+to form a bullet point.
+If
+.Ar text
+is
+.Ql - ,
+the entry is read from standard input.
+.It Cm jot Ar text Op Ar date
+Insert a raw note into the inbox without any prefix.
+If
+.Ar text
+is
+.Ql - ,
+the entry is read from standard input.
+.It Cm ls
+List up to 30 recent plan files, showing the date, day of week, and
+line count for each.
+Files are listed in reverse chronological order.
+.It Cm show Op Ar date
+Print the contents of a plan file to standard output.
+Exits with status 2 if the file does not exist.
+.It Cm search Ar query
+Search across all plan files for lines containing
+.Ar query .
+Matching is case-insensitive.
+Output is in the format:
+.Dl filename:line: content
+.El
+.Sh OPTIONS
+.Bl -tag -width Ds
+.It Fl -init
+Initialize a new plan directory.
+Must be used together with
+.Fl -dir .
+Writes the directory path to the configuration file and creates the
+directory if it does not exist.
+.It Fl -dir Ar directory
+Override the configured plan directory for this invocation.
+When used with
+.Fl -init ,
+the override is persisted to the configuration file.
+.It Fl -last
+Operate on the most recent plan file chronologically, rather than
+today's file.
+Cannot be combined with a
+.Ar date
+argument.
+Not supported with
+.Cm ls
+or
+.Cm search .
+.It Fl -version
+Print the version number and exit.
+.It Fl -help
+Print a usage summary and exit.
+.El
+.Sh DATE EXPRESSIONS
+Several commands accept an optional
+.Ar date
+argument to target a day other than today.
+The following forms are recognized:
+.Bl -tag -width "N days ago" -compact
+.It Ql @
+Today.
+.It Ql today
+Today.
+.It Ql yesterday
+One day ago.
+.It Ql @~N
+.Ar N
+days ago, where
+.Ar N
+is a non-negative integer.
+.It Ql N days ago
+.Ar N
+days ago, in natural language.
+.El
+.Pp
+When targeting a past date, the file must already exist;
+.Nm
+will not create new files for past dates.
+.Sh ENVIRONMENT
+.Bl -tag -width "XDG_CONFIG_HOME"
+.It Ev PLAN_DIR
+If set and non-empty, overrides the directory from the configuration
+file.
+This takes the highest precedence.
+.It Ev VISUAL
+Editor command used to open plan files.
+Checked before
+.Ev EDITOR .
+The value is split using shell quoting rules, so flags may be included
+.Pq e.g. Ql "vim -u NONE" .
+.It Ev EDITOR
+Fallback editor if
+.Ev VISUAL
+is not set.
+.It Ev XDG_CONFIG_HOME
+Base directory for the configuration file.
+Defaults to
+.Pa ~/.config
+if unset.
+.El
+.Sh FILES
+.Bl -tag -width Ds
+.It Pa $XDG_CONFIG_HOME/plan/config
+Configuration file.
+A simple key-value format with one supported key:
+.Dl dir = ~/plan
+On first run, if no configuration exists,
+.Nm
+prompts for the directory interactively and writes this file.
+.It Pa YYYY-MM-DD.plan
+Daily plan files stored in the configured directory.
+.It Pa YYYY-MM-DD.lock
+Lock sidecar files used to serialize concurrent access.
+Created adjacent to each plan file.
+.El
+.Sh EXIT STATUS
+.Bl -tag -width Ds -compact
+.It 0
+Success.
+.It 1
+Runtime error
+.Pq e.g. I/O failure, missing editor .
+.It 2
+Usage error or, in the case of
+.Cm show ,
+the requested file does not exist.
+.El
+.Sh EXAMPLES
+Initialize a plan directory:
+.Dl $ plan --init --dir ~/plan
+.Pp
+Open today's plan in the default editor:
+.Dl $ plan
+.Pp
+Open yesterday's plan:
+.Dl $ plan yesterday
+.Pp
+Log a task for today:
+.Dl $ plan log \(dqReview pull requests\(dq
+.Pp
+Pipe a note from another command:
+.Dl $ echo \(dqRemember to update deps\(dq | plan jot -
+.Pp
+Show the plan from three days ago:
+.Dl $ plan show @~3
+.Pp
+Search all plans for a keyword:
+.Dl $ plan search deploy
+.Pp
+Open the most recent plan file:
+.Dl $ plan --last
+.Sh AUTHORS
+.An Allan Calix
+.Sh CAVEATS
+.Nm
+is alpha software
+.Pq v0.1.0-alpha.1 .
+The file format and command-line interface may change in future releases.
+.Pp
+Lock files
+.Pq Pa *.lock
+are not automatically cleaned up after use and may accumulate
+in the plan directory over time.

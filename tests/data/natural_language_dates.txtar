@@ -1,0 +1,62 @@
+echo "init" > 2026-02-18.plan
+echo "init" > 2026-02-15.plan
+plan log "this is a note for yesterday" yesterday
+plan jot "this is another note for yesterday" yesterday
+plan log "this is a note for 4 days ago" "4 days ago"
+plan log "this is a note for 1 day ago" "1 day ago"
+plan log "today's task" today
+plan show "4 days ago"
+plan show yesterday
+plan show today
+! plan log "malformed test" "days ago"
+! plan log "malformed test 2" "word days ago"
+-- 2026-02-15.plan --
+init
+
+~~~~~~~~inbox~~~~~~~~
+* this is a note for 4 days ago
+~~~~~~~~~~~~~~~~~~~~~
+-- 2026-02-18.plan --
+init
+
+~~~~~~~~inbox~~~~~~~~
+* this is a note for yesterday
+this is another note for yesterday
+* this is a note for 1 day ago
+~~~~~~~~~~~~~~~~~~~~~
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* today's task
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_10_exit.txt --
+2
+-- cmd_10_stderr.txt --
+plan: Invalid date format 'word days ago'. Expected unsigned integer before 'days ago'.
+-- cmd_6_stdout.txt --
+init
+
+~~~~~~~~inbox~~~~~~~~
+* this is a note for 4 days ago
+~~~~~~~~~~~~~~~~~~~~~
+-- cmd_7_stdout.txt --
+init
+
+~~~~~~~~inbox~~~~~~~~
+* this is a note for yesterday
+this is another note for yesterday
+* this is a note for 1 day ago
+~~~~~~~~~~~~~~~~~~~~~
+-- cmd_8_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* today's task
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_9_exit.txt --
+2
+-- cmd_9_stderr.txt --
+plan: Invalid date format. Use @, @~N, today, yesterday, or 'N days ago'.

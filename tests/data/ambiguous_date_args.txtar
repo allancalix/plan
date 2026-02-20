@@ -1,0 +1,22 @@
+# Insert into yesterday's plan
+! plan log "yesterday note" @~1
+# Wait... the above is `plan log "..." @~1`... does it work?
+# The global [DATE] is positional, maybe after flags?
+# Let's test `plan @~1 show` directly:
+! plan @~1 show
+! plan show @~1
+! plan @~1 log "also yesterday"
+# And finally test precedence if both are passed (should probably error or just respect one)
+# plan @~1 show @~2
+-- cmd_1_exit.txt --
+2
+-- cmd_1_stderr.txt --
+plan: No plan file for that date: 2026-02-18.plan
+-- cmd_2_exit.txt --
+2
+-- cmd_3_exit.txt --
+2
+-- cmd_4_exit.txt --
+2
+-- cmd_4_stderr.txt --
+plan: No plan file for that date: 2026-02-18.plan

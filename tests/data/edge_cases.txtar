@@ -1,0 +1,20 @@
+! plan show @~-1
+! plan show @~abc
+! plan log ""
+! plan @~18446744073709551615
+-- cmd_1_exit.txt --
+2
+-- cmd_1_stderr.txt --
+plan: Invalid relative date '@~-1'. Expected unsigned integer.
+-- cmd_2_exit.txt --
+2
+-- cmd_2_stderr.txt --
+plan: Invalid relative date '@~abc'. Expected unsigned integer.
+-- cmd_3_exit.txt --
+2
+-- cmd_3_stderr.txt --
+plan: Message cannot be empty.
+-- cmd_4_exit.txt --
+2
+-- cmd_4_stderr.txt --
+plan: Invalid relative date '@~18446744073709551615'. Expected unsigned integer.

@@ -1,0 +1,22 @@
+plan log "did the thing"
+plan jot "raw note"
+plan show
+plan ls
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* did the thing
+raw note
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_3_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* did the thing
+raw note
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_4_stdout.txt --
+2026-02-19  Thu   7 lines

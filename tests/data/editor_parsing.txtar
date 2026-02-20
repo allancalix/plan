@@ -1,0 +1,22 @@
+# Uses default "cat" fallback for editor from the harness logic wrapper
+plan
+# Test setting an editor with arguments via our new test harness format
+env VISUAL="cat -n" plan
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_1_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_2_stdout.txt --
+     1	2026, Feb 19 - Thursday
+     2	~~~~~~~~~inbox~~~~~~~~~
+     3	~~~~~~~~~~~~~~~~~~~~~~~
+     4	
+     5	---

@@ -1,0 +1,43 @@
+plan --version
+! plan --init
+! plan log ""
+! plan jot ""
+! plan log "hello" @yesterday --last
+! plan ls --last
+! plan search "foo" --last
+! plan --path ls
+! plan --path search "foo"
+-- cmd_1_stdout.txt --
+plan 0.1.0-alpha.1
+-- cmd_2_exit.txt --
+2
+-- cmd_2_stderr.txt --
+plan: --init requires --dir=<path>
+-- cmd_3_exit.txt --
+2
+-- cmd_3_stderr.txt --
+plan: Message cannot be empty.
+-- cmd_4_exit.txt --
+2
+-- cmd_4_stderr.txt --
+plan: Message cannot be empty.
+-- cmd_5_exit.txt --
+2
+-- cmd_5_stderr.txt --
+plan: Cannot use --last with a specific date.
+-- cmd_6_exit.txt --
+2
+-- cmd_6_stderr.txt --
+plan: --last is not supported with the 'ls' command.
+-- cmd_7_exit.txt --
+2
+-- cmd_7_stderr.txt --
+plan: --last is not supported with the 'search' command.
+-- cmd_8_exit.txt --
+2
+-- cmd_8_stderr.txt --
+plan: --path can only be used with the default command.
+-- cmd_9_exit.txt --
+2
+-- cmd_9_stderr.txt --
+plan: --path can only be used with the default command.

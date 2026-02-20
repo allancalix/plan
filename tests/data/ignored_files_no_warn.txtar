@@ -1,0 +1,23 @@
+plan log "hello"
+echo "finder metadata" > .DS_Store
+echo "windows thumb" > Thumbs.db
+echo "vim swap" > .notes.swp
+echo "backup" > old~
+plan ls
+-- .DS_Store --
+finder metadata
+-- .notes.swp --
+vim swap
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* hello
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- Thumbs.db --
+windows thumb
+-- cmd_2_stdout.txt --
+2026-02-19  Thu   6 lines
+-- old~ --
+backup

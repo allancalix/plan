@@ -1,0 +1,22 @@
+plan log "day 1 note"
+>> forward 2 days
+plan log "day 3 note"
+>> forward 1 week
+plan ls
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* day 1 note
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- 2026-02-21.plan --
+2026, Feb 21 - Saturday
+~~~~~~~~~inbox~~~~~~~~~
+* day 3 note
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_3_stdout.txt --
+2026-02-21  Sat   6 lines
+2026-02-19  Thu   6 lines

@@ -1,0 +1,69 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build_and_release:
+    name: Build and Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: plan
+            archive_name: plan-macos-arm64.tar.gz
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: plan
+            archive_name: plan-linux-amd64.tar.gz
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            binary_name: plan
+            archive_name: plan-linux-arm64.tar.gz
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: "1.93.1"
+          targets: ${{ matrix.target }}
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+
+      # Tests are skipped for aarch64-linux-gnu: cross-compiled binaries
+      # cannot execute natively on the x86_64 runner, and QEMU user-mode
+      # emulation is too slow/fragile for the integration test suite.
+      # This target is covered by the native test job in test.yml (x86_64).
+      - name: Run tests
+        if: matrix.target != 'aarch64-unknown-linux-gnu'
+        run: cargo test --features test-clock
+
+      - name: Build binary
+        run: |
+          if [ "${{ matrix.target }}" = "aarch64-unknown-linux-gnu" ]; then
+            export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+          fi
+
+          cargo build --release --target ${{ matrix.target }}
+
+      - name: Package binary
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar -czvf ../../../${{ matrix.archive_name }} ${{ matrix.binary_name }}
+          cd ../../..
+
+      - name: Upload Release Asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.archive_name }}

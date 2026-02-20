@@ -1,0 +1,16 @@
+plan log "hello"
+echo "stray file" > notes.txt
+plan ls
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+* hello
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_2_stderr.txt --
+plan: warning: unexpected files in plan directory: notes.txt (suppress with warn_unexpected = false)
+-- cmd_2_stdout.txt --
+2026-02-19  Thu   6 lines
+-- notes.txt --
+stray file
