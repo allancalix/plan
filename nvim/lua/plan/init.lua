@@ -6,38 +6,132 @@ M.config = {
 }
 
 local ns = vim.api.nvim_create_namespace('plan')
+local buf_zone_map = {} -- buf -> { [line_number] = true } for lines inside language zones
 
 local hl_rules = {
   { pattern = '^%d+, %a+ %d+ %- %a+$', group = 'Title' },         -- header
   { pattern = '^~+inbox~+$',            group = 'Special' },       -- inbox marker
   { pattern = '^~+$',                    group = 'Special' },       -- tilde line
-  { pattern = '^%-%-%-$',               group = 'Comment' },       -- separator
   { pattern = '^%* ',                   group = 'Identifier', sigil = 2 },
   { pattern = '^\\ ',                   group = 'DiagnosticWarn', sigil = 2 },
   { pattern = '^%+ ',                   group = 'DiagnosticOk', sigil = 2 },
   { pattern = '^%- ',                   group = 'DiagnosticError', sigil = 2 },
 }
 
+local lang_aliases = {
+  md = 'markdown',
+  ts = 'typescript',
+  js = 'javascript',
+  py = 'python',
+  rs = 'rust',
+  sh = 'bash',
+  yml = 'yaml',
+}
+
+local function resolve_lang(name)
+  return lang_aliases[name]
+    or vim.treesitter.language.get_lang(name)
+    or name
+end
+
+--- Scan lines for `--- :lang` / `---` zone boundaries.
+--- Returns in_zone (set of 1-indexed line numbers inside a language zone)
+--- and zones (list of { lang, start, stop } with 1-indexed content lines).
+local function detect_zones(lines)
+  local in_zone = {}
+  local zones = {}
+  local i = 1
+  while i <= #lines do
+    local lang = lines[i]:match('^%-%-%-%s*:(%w+)')
+    if lang then
+      local zone_start = i + 1
+      local j = i + 1
+      while j <= #lines and not lines[j]:match('^%-%-%-') do
+        in_zone[j] = true
+        j = j + 1
+      end
+      if zone_start <= j - 1 then
+        zones[#zones + 1] = { lang = resolve_lang(lang), start = zone_start, stop = j - 1 }
+      end
+      i = j -- advance to closing --- (will be processed next iteration as bare ---)
+    else
+      i = i + 1
+    end
+  end
+  return in_zone, zones
+end
+
 local function highlight_buf(buf)
   vim.api.nvim_buf_clear_namespace(buf, ns, 0, -1)
   local lines = vim.api.nvim_buf_get_lines(buf, 0, -1, false)
+  local in_zone, zones = detect_zones(lines)
+
+  -- Cache zone map for keybinding guards
+  buf_zone_map[buf] = in_zone
+
+  -- Highlight --- boundary lines (with or without :lang)
   for i, line in ipairs(lines) do
-    for _, rule in ipairs(hl_rules) do
-      if line:match(rule.pattern) then
-        vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, {
-          end_col = rule.sigil or #line,
-          hl_group = rule.group,
-        })
-        break
-      end
-    end
-    -- Italic dim timestamp suffix on terminal state lines
-    local ts_start = line:match('^[+%-] .* ()%(%d%d%d%d%-%d%d%-%d%d%)$')
-    if ts_start then
-      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, ts_start - 1, {
+    if line:match('^%-%-%-') then
+      vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, {
         end_col = #line,
-        hl_group = 'planTimestamp',
+        hl_group = 'Comment',
       })
+    end
+  end
+
+  -- Tree-sitter highlighting for language zones
+  for _, zone in ipairs(zones) do
+    local code_lines = {}
+    for k = zone.start, zone.stop do
+      code_lines[#code_lines + 1] = lines[k]
+    end
+    local code = table.concat(code_lines, '\n')
+    local ok, parser = pcall(vim.treesitter.get_string_parser, code, zone.lang)
+    if ok then
+      parser:parse(true)
+      -- Apply highlights from each parser in the tree (root + injected children).
+      -- Child parsers (e.g. lua inside markdown fenced blocks) get higher priority
+      -- so their token highlights override the parent's block-level styling.
+      parser:for_each_tree(function(tree, ltree)
+        local lang_name = ltree:lang()
+        local is_root = (lang_name == zone.lang)
+        local priority = is_root and 100 or 125
+        local query = vim.treesitter.query.get(lang_name, 'highlights')
+        if query then
+          for id, node in query:iter_captures(tree:root(), code) do
+            local sr, sc, er, ec = node:range()
+            vim.api.nvim_buf_set_extmark(buf, ns, zone.start - 1 + sr, sc, {
+              end_row = zone.start - 1 + er,
+              end_col = ec,
+              hl_group = '@' .. query.captures[id] .. '.' .. lang_name,
+              priority = priority,
+            })
+          end
+        end
+      end)
+    end
+  end
+
+  -- Plan-specific highlighting (only outside language zones)
+  for i, line in ipairs(lines) do
+    if not in_zone[i] and not line:match('^%-%-%-') then
+      for _, rule in ipairs(hl_rules) do
+        if line:match(rule.pattern) then
+          vim.api.nvim_buf_set_extmark(buf, ns, i - 1, 0, {
+            end_col = rule.sigil or #line,
+            hl_group = rule.group,
+          })
+          break
+        end
+      end
+      -- Italic dim timestamp suffix on terminal state lines
+      local ts_start = line:match('^[+%-] .* ()%(%d%d%d%d%-%d%d%-%d%d%)$')
+      if ts_start then
+        vim.api.nvim_buf_set_extmark(buf, ns, i - 1, ts_start - 1, {
+          end_col = #line,
+          hl_group = 'planTimestamp',
+        })
+      end
     end
   end
 end
@@ -98,9 +192,19 @@ local function today()
   return os.date('%Y-%m-%d')
 end
 
+--- Check if the cursor is inside a language zone.
+local function in_language_zone()
+  local buf = vim.api.nvim_get_current_buf()
+  local zones = buf_zone_map[buf]
+  if not zones then return false end
+  local row = vim.api.nvim_win_get_cursor(0)[1] -- 1-indexed
+  return zones[row] == true
+end
+
 --- Cycle task state: \ → + (done), or reopen +/- → \.
 --- Appends (YYYY-MM-DD) on transition to +, strips it on reopen.
 function M.cycle()
+  if in_language_zone() then return end
   local line = vim.api.nvim_get_current_line()
   local sigil = line:match('^([\\+%-]) ')
   if not sigil then return end
@@ -118,6 +222,7 @@ end
 --- Cancel a task (any state → -), or reopen if already cancelled (- → \).
 --- Appends (YYYY-MM-DD) on cancel, strips it on reopen.
 function M.cancel()
+  if in_language_zone() then return end
   local line = vim.api.nvim_get_current_line()
   local sigil = line:match('^([\\*+%-]) ')
   if not sigil then return end
