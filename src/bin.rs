@@ -308,8 +308,12 @@ fn run() -> Result<()> {
             if !path.exists() {
                 return Err(silent_exit(2));
             }
-            let _lock = file::acquire_shared_lock(&path)?;
-            let content = fs::read_to_string(&path)?;
+            let content = {
+                let _lock = file::acquire_shared_lock(&path)?;
+                fs::read_to_string(&path)?
+            };
+            // Print only after releasing the lock: stdout may be a pipe nobody is
+            // reading (`plan show | less`), and every writer would wait on it.
             write!(io::stdout(), "{}", content).map_err(stdout_err)?;
         }
         Some(Commands::Search { query }) => {
