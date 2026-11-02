@@ -29,17 +29,23 @@
 //! position `2k`. A linearization exists iff no operation that finished before
 //! another started has a larger position, which an O(n log n) sweep can check.
 //!
-//! Beyond safety, the checker also reports liveness (timeouts, failed final
-//! reads), crashes (any panic, or a signal nobody sent), and hygiene: plan must
-//! never print an "unexpected files" warning about its own files, and must
-//! leave nothing in the plan directory but plan files and swept-up temp files.
+//! Beyond safety, the checker also reports:
+//!
+//! * liveness: timeouts, failed final reads, and stalls (one caller waiting on
+//!   another caller's trouble, beyond time spent behind deliberately paused
+//!   processes);
+//! * crashes: any panic, or a signal nobody sent;
+//! * hygiene: plan must never print an "unexpected files" warning about its own
+//!   files, and must leave nothing in the plan directory but plan files and
+//!   temp files it will sweep up.
 
-use crate::history::{Event, F, FINAL, NEMESIS, Type, Value};
+use crate::history::{Event, F, FINAL, NEMESIS, REAPER, Type, Value};
 use crate::model;
 use crate::sandbox::Snapshot;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt::Write as _;
+use std::time::Duration;
 
 const MAX_EXAMPLES: usize = 8;
 
@@ -63,7 +69,7 @@ pub struct Stats {
     /// fault annotation -> number of ops it touched
     pub faults: BTreeMap<String, usize>,
     /// nemesis action -> count
-    pub nemesis: BTreeMap<&'static str, usize>,
+    pub nemesis: BTreeMap<String, usize>,
     /// key -> entries in the final file
     pub final_entries: BTreeMap<String, usize>,
     /// indeterminate (`info`) appends that did / did not take effect
@@ -71,6 +77,8 @@ pub struct Stats {
     pub info_appends_vanished: usize,
     /// temp files left by writers killed mid-write
     pub leftover_temp_files: usize,
+    /// longest wait not explained by a paused process or the op's own fault
+    pub max_unexplained_wait_s: f64,
     pub duration_s: f64,
 }
 
@@ -97,6 +105,11 @@ impl Report {
             s,
             "temp files left by killed writers: {}",
             self.stats.leftover_temp_files
+        );
+        let _ = writeln!(
+            s,
+            "longest unexplained wait: {:.2}s",
+            self.stats.max_unexplained_wait_s
         );
         if !self.stats.nemesis.is_empty() {
             let _ = writeln!(s, "nemesis: {}", join_counts(&self.stats.nemesis));
@@ -153,8 +166,17 @@ impl Op<'_> {
     }
     /// Completion is recorded only after the process is reaped, so even for
     /// crashed (`info`) ops this is a hard upper bound on when they acted.
+    /// Not so for abandoned ops: the process outlived the client, so it may
+    /// have acted at any later time.
     fn end(&self) -> u64 {
-        self.done.map_or(u64::MAX, |d| d.time)
+        match self.done {
+            Some(d) if !self.has_fault("abandoned") => d.time,
+            _ => u64::MAX,
+        }
+    }
+    /// How long the caller waited, as opposed to when the op could have acted.
+    fn latency(&self) -> Option<u64> {
+        self.done.map(|d| d.time - self.inv.time)
     }
     fn key(&self) -> Option<&str> {
         self.inv.key.as_deref()
@@ -216,11 +238,19 @@ struct Checker {
     report: Report,
 }
 
-pub fn check(history: &[Event], snap: &Snapshot) -> Report {
+/// `stall` bounds how long any caller may wait beyond time spent behind
+/// processes the nemesis deliberately paused.
+pub fn check(history: &[Event], snap: &Snapshot, stall: Duration) -> Report {
     let mut c = Checker::default();
     let ops = c.pair(history);
     c.stats(history, &ops);
     c.check_outcomes(&ops);
+    c.check_stalls(history, &ops, stall.as_nanos() as u64);
+    for e in history.iter().filter(|e| e.process == REAPER) {
+        if let Value::Text(problem) = &e.value {
+            c.anomaly("timeout", problem.clone());
+        }
+    }
     let finals = c.parse_finals(snap);
     c.check_entries(&ops, &finals);
     c.check_reads_and_order(&ops, &finals, snap);
@@ -249,7 +279,10 @@ impl Checker {
     fn pair<'a>(&mut self, history: &'a [Event]) -> Vec<Op<'a>> {
         let mut ops: Vec<Op> = Vec::new();
         let mut pending: HashMap<&str, usize> = HashMap::new();
-        for e in history.iter().filter(|e| e.process != NEMESIS) {
+        for e in history
+            .iter()
+            .filter(|e| e.process != NEMESIS && e.process != REAPER)
+        {
             if e.typ == Type::Invoke {
                 if let Some(prev) = pending.insert(&e.process, ops.len()) {
                     let prev = ops[prev].describe();
@@ -280,7 +313,11 @@ impl Checker {
     fn stats(&mut self, history: &[Event], ops: &[Op]) {
         let stats = &mut self.report.stats;
         for e in history.iter().filter(|e| e.process == NEMESIS) {
-            *stats.nemesis.entry(e.f.as_str()).or_default() += 1;
+            let name = match (&e.f, &e.value) {
+                (F::Start | F::Stop, Value::Text(fault)) => format!("{fault} {}", e.f.as_str()),
+                (f, _) => f.as_str().to_string(),
+            };
+            *stats.nemesis.entry(name).or_default() += 1;
         }
         for op in ops {
             let cmd = stats.ops.entry(op.command().to_string()).or_default();
@@ -339,6 +376,66 @@ impl Checker {
             }
             if let Value::Malformed(reason) = &done.value {
                 self.anomaly("malformed-read", format!("{}: {reason}", op.describe()));
+            }
+        }
+    }
+
+    /// Liveness: one caller's trouble must not become everyone's. Each op's
+    /// wait, minus the time some process was deliberately paused (a stopped
+    /// lock holder legitimately stalls everyone), must stay under `stall`.
+    /// Ops slowed by their own fault are exempt.
+    fn check_stalls(&mut self, history: &[Event], ops: &[Op], stall: u64) {
+        const OWN: &[&str] = &[
+            "sigstop",
+            "stdout-hung",
+            "stdin-slow",
+            "abandoned",
+            "timeout",
+        ];
+        let done_at: HashMap<usize, u64> = ops
+            .iter()
+            .filter_map(|op| Some((op.inv.index, op.done?.time)))
+            .collect();
+        let mut paused: Vec<(u64, u64)> = Vec::new();
+        for (i, e) in history.iter().enumerate() {
+            if e.process != NEMESIS || e.f != F::Pause {
+                continue;
+            }
+            // Until resumed, or until the process ended (killed while stopped,
+            // or abandoned, which resumes it).
+            let resumed = history[i + 1..]
+                .iter()
+                .find(|r| r.process == NEMESIS && r.f == F::Resume && r.target == e.target)
+                .map(|r| r.time);
+            let end = resumed
+                .or_else(|| e.target.and_then(|t| done_at.get(&t).copied()))
+                .unwrap_or(u64::MAX);
+            paused.push((e.time, end));
+        }
+        for op in ops {
+            let Some(wait) = op.latency() else { continue };
+            if OWN.iter().any(|f| op.has_fault(f)) {
+                continue;
+            }
+            let (start, end) = (op.start(), op.start() + wait);
+            let excused: u64 = paused
+                .iter()
+                .map(|&(a, b)| b.min(end).saturating_sub(a.max(start)))
+                .sum();
+            let unexplained = wait.saturating_sub(excused);
+            let stats = &mut self.report.stats;
+            stats.max_unexplained_wait_s =
+                stats.max_unexplained_wait_s.max(unexplained as f64 / 1e9);
+            if unexplained > stall {
+                self.anomaly(
+                    "stall",
+                    format!(
+                        "{} waited {:.2}s, only {:.2}s of it behind paused processes",
+                        op.describe(),
+                        wait as f64 / 1e9,
+                        excused as f64 / 1e9
+                    ),
+                );
             }
         }
     }
@@ -614,7 +711,7 @@ fn describe_pos(pos: usize, len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::render_plan;
+    use crate::model::render;
 
     const K: &str = "2026-02-19";
 
@@ -687,13 +784,32 @@ mod tests {
                 e.index = i;
             }
             let snap = Snapshot {
-                files: BTreeMap::from([(K.to_string(), render_plan(K, final_entries))]),
+                files: BTreeMap::from([(K.to_string(), render(K, final_entries))]),
                 temp: vec![],
                 stray: vec![],
             };
-            check(&self.0, &snap)
+            check(&self.0, &snap, Duration::from_secs(1))
+        }
+        fn nemesis(&mut self, f: F, time: u64) -> &mut Self {
+            self.0.push(Event {
+                process: NEMESIS.into(),
+                typ: Type::Info,
+                f,
+                time,
+                ..Event::default()
+            });
+            self
+        }
+        /// Mark the most recent completion with `fault`, replacing any others.
+        fn fault(&mut self, fault: &str) -> &mut Self {
+            let done = self.0.last_mut().unwrap();
+            done.faults = vec![fault.into()];
+            done.signal = None;
+            self
         }
     }
+
+    const SEC: u64 = 1_000_000_000;
 
     fn kinds(r: &Report) -> Vec<&'static str> {
         r.anomalies.keys().copied().collect()
@@ -836,5 +952,42 @@ mod tests {
         h.append("c0", "a", (0, 1), Type::Ok);
         h.0[1].warning = Some("plan: warning: unexpected files in plan directory: x".into());
         assert_eq!(kinds(&h.check(&["a"])), ["unexpected-files-warning"]);
+    }
+
+    #[test]
+    fn detects_stall() {
+        let r = H::default().show("c0", &[], (0, 3 * SEC)).check(&[]);
+        assert_eq!(kinds(&r), ["stall"]);
+    }
+
+    #[test]
+    fn time_behind_a_paused_process_is_not_a_stall() {
+        let r = H::default()
+            .nemesis(F::Pause, SEC / 10)
+            .show("c0", &[], (0, 3 * SEC))
+            .nemesis(F::Resume, 2 * SEC + SEC / 2)
+            .check(&[]);
+        assert!(r.valid, "{}", r.summary());
+    }
+
+    #[test]
+    fn ops_slowed_by_their_own_fault_are_not_stalls() {
+        let r = H::default()
+            .show("c0", &[], (0, 3 * SEC))
+            .fault("stdout-hung")
+            .check(&[]);
+        assert!(r.valid, "{}", r.summary());
+    }
+
+    #[test]
+    fn abandoned_append_may_land_late() {
+        // Unlike a crashed op (see `crashed_append_bounded_by_reap_time`), the
+        // abandoned process outlived its caller, so it may commit after the read.
+        let r = H::default()
+            .append("c0", "a", (0, 1), Type::Info)
+            .fault("abandoned")
+            .show("c1", &[], (2, 3))
+            .check(&["a"]);
+        assert!(r.valid, "{}", r.summary());
     }
 }

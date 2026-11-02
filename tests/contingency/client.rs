@@ -5,10 +5,14 @@
 //! supervises it (delivering nemesis signals, enforcing a timeout), reaps it,
 //! and records what happened. Clients never judge correctness; they only report
 //! what they saw. That's the checker's job.
+//!
+//! An *abandoned* op is the exception: the client records it as indeterminate
+//! and moves on while the process keeps running, and a reaper thread collects
+//! it later. Whatever it writes lands after the client stopped watching.
 
 use crate::history::{Event, F, Recorder, Type, Value};
 use crate::model::{self, ENTRY_PREFIX};
-use crate::nemesis::Control;
+use crate::nemesis::{Control, Fault};
 use crate::sandbox::Sandbox;
 use chrono::NaiveDate;
 use rand::rngs::StdRng;
@@ -18,18 +22,24 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Read, Write};
 use std::os::unix::process::ExitStatusExt;
 use std::path::Path;
-use std::process::{ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ExitStatus, Stdio};
+use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 const POLL: Duration = Duration::from_micros(200);
 const WARNING_PREFIX: &str = "plan: warning: unexpected files";
 
+/// Reaper threads for abandoned ops. Each returns a description of the
+/// problem if its process had to be killed because it never finished.
+pub type Reapers = Mutex<Vec<JoinHandle<Option<String>>>>;
+
 pub struct Ctx<'a> {
     pub plan_bin: &'a Path,
     pub sandbox: &'a Sandbox,
     pub rec: &'a Recorder,
     pub ctl: &'a Control,
+    pub reapers: &'a Reapers,
     pub base_date: NaiveDate,
     pub timeout: Duration,
 }
@@ -93,15 +103,32 @@ impl Op {
             _ => F::Read,
         }
     }
+
+    fn stdin_text(&self) -> Option<&str> {
+        match &self.kind {
+            Kind::Append {
+                stdin: true, text, ..
+            } => Some(text),
+            _ => None,
+        }
+    }
+
+    fn prints(&self) -> bool {
+        !matches!(self.kind, Kind::Append { .. })
+    }
 }
 
-/// Stdio sabotage applied at spawn time while the `pipe` fault is active.
+/// Stdio sabotage applied at spawn time while a stdio fault window is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum StdioFault {
     StdoutClosed,
     StderrClosed,
     StdinClosed,
     StdinPartial,
+    /// Our stdout reader stalls this long before it starts reading.
+    StdoutHung(Duration),
+    /// Half the stdin line, then this long a pause, then the rest.
+    StdinSlow(Duration),
 }
 
 impl StdioFault {
@@ -111,8 +138,17 @@ impl StdioFault {
             StdioFault::StderrClosed => "stderr-closed",
             StdioFault::StdinClosed => "stdin-closed",
             StdioFault::StdinPartial => "stdin-partial",
+            StdioFault::StdoutHung(_) => "stdout-hung",
+            StdioFault::StdinSlow(_) => "stdin-slow",
         }
     }
+}
+
+/// How a client treats one of its child's output pipes.
+enum Drain {
+    Read,
+    Close,
+    StallThenRead(Duration),
 }
 
 pub struct Client<'a> {
@@ -121,6 +157,14 @@ pub struct Client<'a> {
     rng: StdRng,
     ctx: &'a Ctx<'a>,
     seq: u64,
+}
+
+/// Everything attached to a running child, so it can be handed to a reaper.
+struct Running {
+    child: Child,
+    stdin: Option<JoinHandle<()>>,
+    stdout: Reader,
+    stderr: Reader,
 }
 
 impl<'a> Client<'a> {
@@ -188,33 +232,45 @@ impl<'a> Client<'a> {
     }
 
     fn pick_stdio_fault(&mut self, op: &Op) -> Option<StdioFault> {
-        if !self.ctx.ctl.pipe_active() || !self.rng.random_bool(0.5) {
-            return None;
+        let ctl = self.ctx.ctl;
+        let rng = &mut self.rng;
+        let mut options = Vec::new();
+        if ctl.active(Fault::Pipe) && rng.random_bool(0.5) {
+            options.extend([StdioFault::StdoutClosed, StdioFault::StderrClosed]);
+            if op.stdin_text().is_some() {
+                options.extend([StdioFault::StdinClosed, StdioFault::StdinPartial]);
+            }
         }
-        let mut options = vec![StdioFault::StdoutClosed, StdioFault::StderrClosed];
-        if matches!(op.kind, Kind::Append { stdin: true, .. }) {
-            options.extend([StdioFault::StdinClosed, StdioFault::StdinPartial]);
+        if ctl.active(Fault::HangStdout) && op.prints() && rng.random_bool(0.3) {
+            let stall = Duration::from_millis(rng.random_range(3000..5000));
+            options.push(StdioFault::StdoutHung(stall));
         }
-        options.choose(&mut self.rng).copied()
+        if ctl.active(Fault::SlowStdin) && op.stdin_text().is_some() {
+            let delay = Duration::from_millis(rng.random_range(100..1000));
+            options.push(StdioFault::StdinSlow(delay));
+        }
+        options.choose(rng).copied()
+    }
+
+    /// While the `abandon` window is open, some callers lose patience after a
+    /// few milliseconds.
+    fn pick_patience(&mut self) -> Option<Duration> {
+        (self.ctx.ctl.active(Fault::Abandon) && self.rng.random_bool(0.3))
+            .then(|| Duration::from_millis(self.rng.random_range(0..30)))
     }
 
     fn invoke(&mut self, op: Op) {
         let ctx = self.ctx;
         let stdio_fault = self.pick_stdio_fault(&op);
+        let patience = self.pick_patience();
         let entry = match &op.kind {
             Kind::Append { line, .. } => Value::Entry(line.clone()),
             _ => Value::None,
         };
-        let stdin_text = match &op.kind {
-            Kind::Append {
-                stdin: true, text, ..
-            } => Some(text.clone()),
-            _ => None,
-        };
 
         let mut cmd = ctx.sandbox.command(ctx.plan_bin, &op.mock_date);
         cmd.args(&op.argv)
-            .stdin(if stdin_text.is_some() {
+            .stdin(if op.stdin_text().is_some() {
                 Stdio::piped()
             } else {
                 Stdio::null()
@@ -242,49 +298,51 @@ impl<'a> Client<'a> {
             Ok(child) => child,
             Err(e) => {
                 // The process never existed, so the op definitely didn't happen.
-                self.record_completion(
-                    &op,
-                    Type::Fail,
-                    entry,
-                    vec![],
-                    None,
-                    None,
-                    Some(format!("spawn: {e}")),
-                    None,
-                );
+                let mut done = self.completion(&op, Type::Fail, entry, vec![]);
+                done.error = Some(format!("spawn: {e}"));
+                ctx.rec.record(done);
                 return;
             }
         };
         let pid = child.id() as libc::pid_t;
         ctx.ctl.begin(self.id, invoke_index);
 
-        if let (Some(mut stdin), Some(text)) = (child.stdin.take(), stdin_text) {
-            // Write errors are expected if the child already died.
-            let _ = match stdio_fault {
-                Some(StdioFault::StdinClosed) => Ok(()),
-                Some(StdioFault::StdinPartial) => stdin.write_all(text.as_bytes()),
-                _ => stdin.write_all(format!("{text}\n").as_bytes()),
-            };
-        }
+        let stdin = match (child.stdin.take(), op.stdin_text()) {
+            (Some(pipe), Some(text)) => Some(feed(pipe, text.to_string(), stdio_fault)),
+            _ => None,
+        };
         let stdout = reader(
             child.stdout.take(),
-            stdio_fault == Some(StdioFault::StdoutClosed),
+            match stdio_fault {
+                Some(StdioFault::StdoutClosed) => Drain::Close,
+                Some(StdioFault::StdoutHung(d)) => Drain::StallThenRead(d),
+                _ => Drain::Read,
+            },
         );
         let stderr = reader(
             child.stderr.take(),
-            stdio_fault == Some(StdioFault::StderrClosed),
+            match stdio_fault {
+                Some(StdioFault::StderrClosed) => Drain::Close,
+                _ => Drain::Read,
+            },
         );
+        let mut running = Running {
+            child,
+            stdin,
+            stdout,
+            stderr,
+        };
 
         let mut delivered = Vec::new();
         let mut timed_out = false;
         let status: io::Result<ExitStatus> = loop {
-            match child.try_wait() {
+            match running.child.try_wait() {
                 Ok(Some(status)) => break Ok(status),
                 Ok(None) => {}
                 Err(e) => {
                     // Still unreaped, so the pid is still ours to kill.
-                    let _ = child.kill();
-                    let _ = child.wait();
+                    let _ = running.child.kill();
+                    let _ = running.child.wait();
                     break Err(e);
                 }
             }
@@ -292,6 +350,29 @@ impl<'a> Client<'a> {
                 // SAFETY: plain syscall; `pid` is our unreaped child.
                 unsafe { libc::kill(pid, sig.raw()) };
                 delivered.push(sig.name().to_string());
+            }
+            if let Some(patience) = patience
+                && started.elapsed() >= patience
+            {
+                // Out of patience. Nobody will resume the process for us once
+                // we leave the slot, so make sure it isn't stopped.
+                // SAFETY: as above.
+                unsafe { libc::kill(pid, libc::SIGCONT) };
+                ctx.ctl.end(self.id);
+                delivered.push("abandoned".to_string());
+                let typ = match op.kind {
+                    Kind::Append { .. } | Kind::Create => Type::Info,
+                    _ => Type::Fail, // a read we never saw the result of
+                };
+                ctx.rec.record(self.completion(&op, typ, entry, delivered));
+                let label = format!("{} op #{invoke_index}", self.name);
+                let timeout = ctx.timeout;
+                let reaper = thread::spawn(move || reap(running, label, started, timeout));
+                ctx.reapers
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(reaper);
+                return;
             }
             if !timed_out && started.elapsed() > ctx.timeout {
                 // SAFETY: as above.
@@ -303,8 +384,11 @@ impl<'a> Client<'a> {
         };
         ctx.ctl.end(self.id);
 
-        let stdout = join(stdout);
-        let stderr = join(stderr);
+        if let Some(h) = running.stdin {
+            let _ = h.join();
+        }
+        let stdout = join(running.stdout);
+        let stderr = join(running.stderr);
         // plan's "unexpected files" warning is not an error, but it is user-visible
         // noise worth reporting, so it gets its own field.
         let (warnings, stderr): (Vec<&str>, Vec<&str>) =
@@ -316,42 +400,84 @@ impl<'a> Client<'a> {
             Ok(st) => (st.code(), st.signal()),
             Err(_) => (None, None),
         };
-        let error = match &status {
+        let stdout = (stdio_fault != Some(StdioFault::StdoutClosed)).then_some(stdout.as_str());
+        let (typ, value) = classify(&op, exit, stdout, &stderr);
+        let mut done = self.completion(&op, typ, value, delivered);
+        done.exit = exit;
+        done.signal = signal;
+        done.warning = warning;
+        done.error = match &status {
             Err(e) => Some(format!("wait: {e}")),
             Ok(_) if !stderr.trim().is_empty() => Some(tail(&stderr)),
             Ok(_) => None,
         };
-        let stdout = (stdio_fault != Some(StdioFault::StdoutClosed)).then_some(stdout.as_str());
-        let (typ, value) = classify(&op, exit, stdout, &stderr);
-        self.record_completion(&op, typ, value, delivered, exit, signal, error, warning);
+        ctx.rec.record(done);
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn record_completion(
-        &self,
-        op: &Op,
-        typ: Type,
-        value: Value,
-        faults: Vec<String>,
-        exit: Option<i32>,
-        signal: Option<i32>,
-        error: Option<String>,
-        warning: Option<String>,
-    ) {
-        self.ctx.rec.record(Event {
+    fn completion(&self, op: &Op, typ: Type, value: Value, faults: Vec<String>) -> Event {
+        Event {
             process: self.name.clone(),
             typ,
             f: op.f(),
             key: op.key.clone(),
             value,
             faults,
-            exit,
-            signal,
-            error,
-            warning,
             ..Event::default()
-        });
+        }
     }
+}
+
+/// Wait out an abandoned process. It gets the same timeout as any other op;
+/// one that blows it is killed and reported, since it would have hung forever.
+fn reap(
+    mut running: Running,
+    label: String,
+    started: Instant,
+    timeout: Duration,
+) -> Option<String> {
+    let mut problem = None;
+    loop {
+        match running.child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > timeout => {
+                problem = Some(format!("abandoned {label} still running after {timeout:?}"));
+                let _ = running.child.kill();
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(1)),
+            Err(e) => {
+                problem = Some(format!("abandoned {label}: wait failed: {e}"));
+                let _ = running.child.kill();
+                let _ = running.child.wait();
+                break;
+            }
+        }
+    }
+    if let Some(h) = running.stdin {
+        let _ = h.join();
+    }
+    join(running.stdout);
+    join(running.stderr);
+    problem
+}
+
+/// Write `text` to the child's stdin on a thread, so a slow or stuck pipe
+/// never blocks supervision. Dropping the pipe at the end sends EOF.
+fn feed(mut pipe: ChildStdin, text: String, fault: Option<StdioFault>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        // Write errors are expected if the child already died.
+        let _ = match fault {
+            Some(StdioFault::StdinClosed) => Ok(()),
+            Some(StdioFault::StdinPartial) => pipe.write_all(text.as_bytes()),
+            Some(StdioFault::StdinSlow(delay)) => {
+                let (head, rest) = text.split_at(text.len() / 2);
+                pipe.write_all(head.as_bytes()).and_then(|()| {
+                    thread::sleep(delay);
+                    pipe.write_all(format!("{rest}\n").as_bytes())
+                })
+            }
+            _ => pipe.write_all(format!("{text}\n").as_bytes()),
+        };
+    })
 }
 
 /// Decide what an exit status means.
@@ -407,13 +533,16 @@ fn classify(op: &Op, exit: Option<i32>, stdout: Option<&str>, stderr: &str) -> (
 type Reader = Option<JoinHandle<Vec<u8>>>;
 
 /// Drain a child pipe on its own thread so a chatty child can't block on a
-/// full pipe. With `sabotage`, close our end instead so the child hits EPIPE.
-fn reader<R: Read + Send + 'static>(pipe: Option<R>, sabotage: bool) -> Reader {
+/// full pipe, unless the fault says to close it (EPIPE) or stall first.
+fn reader<R: Read + Send + 'static>(pipe: Option<R>, how: Drain) -> Reader {
     let mut pipe = pipe?;
-    if sabotage {
-        return None; // dropping `pipe` closes the read end
-    }
+    let stall = match how {
+        Drain::Close => return None, // dropping `pipe` closes the read end
+        Drain::Read => Duration::ZERO,
+        Drain::StallThenRead(d) => d,
+    };
     Some(thread::spawn(move || {
+        thread::sleep(stall);
         let mut buf = Vec::new();
         let _ = pipe.read_to_end(&mut buf);
         buf

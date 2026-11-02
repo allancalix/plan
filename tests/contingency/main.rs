@@ -28,6 +28,8 @@
 //! | `CONTINGENCY_CLIENTS`    | `8`       | concurrent callers                         |
 //! | `CONTINGENCY_FAULTS`     | `default` | e.g. `kill,pause`, `none`, `all`           |
 //! | `CONTINGENCY_OP_TIMEOUT` | `10`      | seconds before a client gives up on a call |
+//! | `CONTINGENCY_STALL`      | `1.5`     | max seconds a caller may wait, not counting |
+//! |                          |           | time behind deliberately paused processes  |
 //! | `CONTINGENCY_OUT`        | `target/tmp/contingency` | where run directories go    |
 //!
 //! Each run leaves `history.jsonl`, `results.json`, `results.txt`, and the
@@ -40,9 +42,8 @@ mod model;
 mod nemesis;
 mod sandbox;
 
-use chrono::NaiveDate;
-use client::{Client, Ctx};
-use history::Recorder;
+use client::{Client, Ctx, Reapers};
+use history::{Event, F, Recorder, Type};
 use nemesis::{Control, Fault};
 use sandbox::Sandbox;
 use std::collections::BTreeSet;
@@ -59,7 +60,12 @@ struct Config {
     duration: Duration,
     faults: Vec<Fault>,
     timeout: Duration,
+    stall: Duration,
     out: PathBuf,
+}
+
+fn stall_limit() -> Duration {
+    Duration::from_secs_f64(env("CONTINGENCY_STALL").unwrap_or(1.5))
 }
 
 fn env<T: FromStr>(key: &str) -> Option<T> {
@@ -82,6 +88,7 @@ impl Config {
                 .map(|s| Fault::parse_list(&s))
                 .unwrap_or_else(|| Fault::DEFAULT.to_vec()),
             timeout: Duration::from_secs_f64(env("CONTINGENCY_OP_TIMEOUT").unwrap_or(10.0)),
+            stall: stall_limit(),
             out: env("CONTINGENCY_OUT")
                 .unwrap_or_else(|| Path::new(env!("CARGO_TARGET_TMPDIR")).join("contingency")),
         }
@@ -115,13 +122,16 @@ fn run(cfg: &Config) -> Outcome {
     println!("{}\nrun directory: {}", cfg.describe(), dir.display());
 
     let rec = Recorder::new();
+    seed(&sandbox, &rec);
     let ctl = Control::new(cfg.clients + 1); // +1: the final reader
+    let reapers = Reapers::default();
     let ctx = Ctx {
         plan_bin: Path::new(env!("CARGO_BIN_EXE_plan")),
         sandbox: &sandbox,
         rec: &rec,
         ctl: &ctl,
-        base_date: NaiveDate::from_ymd_opt(2026, 2, 19).unwrap(),
+        reapers: &reapers,
+        base_date: model::base_date(),
         timeout: cfg.timeout,
     };
 
@@ -145,6 +155,20 @@ fn run(cfg: &Config) -> Outcome {
         ctl.stop();
     });
 
+    // Abandoned processes may still be running; their late writes must land
+    // before the final reads, or the final state would be a moving target.
+    let abandoned = std::mem::take(&mut *reapers.lock().unwrap_or_else(|e| e.into_inner()));
+    for reaper in abandoned {
+        if let Some(problem) = reaper.join().expect("reaper panicked") {
+            rec.record(Event {
+                process: history::REAPER.into(),
+                typ: Type::Info,
+                value: history::Value::Text(problem),
+                ..Event::default()
+            });
+        }
+    }
+
     // Quiescence: every process is dead and all faults are healed. A final
     // round of reads must succeed and agree with the files on disk.
     let keys: BTreeSet<String> = rec.events().into_iter().filter_map(|e| e.key).collect();
@@ -153,10 +177,38 @@ fn run(cfg: &Config) -> Outcome {
     let events = rec.events();
     history::write_jsonl(&dir.join("history.jsonl"), &events).expect("write history");
     let snapshot = sandbox.snapshot().expect("snapshot sandbox");
-    let report = checker::check(&events, &snapshot);
+    let report = checker::check(&events, &snapshot, cfg.stall);
     save(&dir, &report, &cfg.describe());
     println!("{}", report.summary());
     Outcome { report, dir }
+}
+
+/// Create the seeded plan files (with ballast) before any client starts, and
+/// record each as a completed create so the checker knows they exist.
+fn seed(sandbox: &Sandbox, rec: &Recorder) {
+    for key in model::seeded_keys() {
+        let op = Event {
+            process: history::SETUP.into(),
+            f: F::Create,
+            key: Some(key.clone()),
+            argv: vec!["seed".into()],
+            mock_date: Some(key.clone()),
+            ..Event::default()
+        };
+        rec.record(Event {
+            typ: Type::Invoke,
+            ..op.clone()
+        });
+        fs::write(
+            sandbox.plans.join(format!("{key}.plan")),
+            model::render(&key, &[]),
+        )
+        .expect("seed plan file");
+        rec.record(Event {
+            typ: Type::Ok,
+            ..op
+        });
+    }
 }
 
 fn save(dir: &Path, report: &checker::Report, header: &str) {
@@ -172,11 +224,8 @@ fn save(dir: &Path, report: &checker::Report, header: &str) {
     .expect("write results.txt");
 }
 
-/// The main event: plan under the default faults must uphold its model.
-#[test]
-fn survives_faults() {
-    let cfg = Config::from_env("faults");
-    let out = run(&cfg);
+fn assert_valid(cfg: &Config) {
+    let out = run(cfg);
     assert!(
         out.report.valid,
         "{}\n{}\nhistory and sandbox kept in {}",
@@ -184,6 +233,23 @@ fn survives_faults() {
         out.report.summary(),
         out.dir.display()
     );
+}
+
+/// The main event: plan under every default fault at once must uphold its model.
+#[test]
+fn survives_faults() {
+    assert_valid(&Config::from_env("faults"));
+}
+
+/// A reader that stops reading (`plan show | less`, pager left open) must
+/// not block anyone else. Faults mask each other in the combined run, so this
+/// property gets a run of its own.
+#[test]
+fn survives_hung_readers() {
+    let mut cfg = Config::from_env("hung-readers");
+    cfg.faults = vec![Fault::HangStdout];
+    cfg.duration = cfg.duration.min(Duration::from_secs(3));
+    assert_valid(&cfg);
 }
 
 /// A harness that never fails proves nothing. A rogue writer that rewrites plan
@@ -216,7 +282,7 @@ fn recheck() {
     let snapshot = Sandbox::open(&dir.join("sandbox"))
         .snapshot()
         .expect("snapshot sandbox");
-    let report = checker::check(&events, &snapshot);
+    let report = checker::check(&events, &snapshot, stall_limit());
     println!("{}", report.summary());
     assert!(report.valid, "{}", report.summary());
 }

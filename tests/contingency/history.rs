@@ -17,6 +17,10 @@ use std::time::Instant;
 
 pub const NEMESIS: &str = "nemesis";
 pub const FINAL: &str = "final";
+/// Seeds plan files before the workload starts.
+pub const SETUP: &str = "setup";
+/// Collects abandoned processes; reports any that never finished.
+pub const REAPER: &str = "reaper";
 
 #[derive(
     Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash,
@@ -57,8 +61,10 @@ pub enum F {
     Kill,
     Pause,
     Resume,
-    PipeStart,
-    PipeStop,
+    /// A fault window opened (value: the fault name).
+    Start,
+    /// A fault window closed (value: the fault name).
+    Stop,
     ClockSkew,
     ClockReset,
     RogueWrite,
@@ -73,8 +79,8 @@ impl F {
             F::Kill => "kill",
             F::Pause => "pause",
             F::Resume => "resume",
-            F::PipeStart => "pipe-start",
-            F::PipeStop => "pipe-stop",
+            F::Start => "start",
+            F::Stop => "stop",
             F::ClockSkew => "clock-skew",
             F::ClockReset => "clock-reset",
             F::RogueWrite => "rogue-write",
@@ -123,6 +129,9 @@ pub struct Event {
     pub argv: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mock_date: Option<String>,
+    /// Nemesis events: history index of the invocation they targeted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<usize>,
     /// Faults that touched this operation (stdio sabotage on invoke, signals
     /// delivered on completion).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

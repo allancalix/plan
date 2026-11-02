@@ -13,7 +13,12 @@
 //! ~~~~~~~~~~~~~~~~~~~~~~~      <- inbox close
 //!                              <- blank
 //! ---
+//! Notes for 2026-02-19, line 1: ...  <- ballast prose (seeded files only)
 //! ```
+//!
+//! Two of the dates are seeded with ballast prose before the run. It makes those
+//! files bigger than any pipe buffer, so a reader that stops reading really does
+//! block `plan show` mid-write, and `plan` must never change a byte of it.
 
 use chrono::NaiveDate;
 use std::collections::BTreeMap;
@@ -25,13 +30,58 @@ pub const ENTRY_PREFIX: &str = "jx:";
 pub const TEMPLATE_LINES: usize = 5;
 /// 1-based line number of the first inbox entry.
 const FIRST_ENTRY_LINE: usize = 3;
+/// Ballast prose lines in a seeded file (about 140KB).
+const BALLAST_LINES: usize = 1200;
 
 pub fn key(date: NaiveDate) -> String {
     date.format(KEY_FORMAT).to_string()
 }
 
+/// The date clients consider "today" when no clock fault is active.
+pub fn base_date() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2026, 2, 19).unwrap()
+}
+
 pub fn date(key: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(key, KEY_FORMAT).ok()
+}
+
+/// Plan files that exist with ballast before the run starts: today and
+/// yesterday. Other dates the clock fault reaches start out missing, so
+/// creation and "no plan file" paths still get exercised.
+pub fn seeded_keys() -> Vec<String> {
+    let base = base_date();
+    vec![key(base - chrono::Duration::days(1)), key(base)]
+}
+
+fn is_seeded(key: &str) -> bool {
+    seeded_keys().iter().any(|k| k == key)
+}
+
+fn ballast(key: &str) -> Vec<String> {
+    if !is_seeded(key) {
+        return Vec::new();
+    }
+    (1..=BALLAST_LINES)
+        .map(|i| {
+            format!(
+                "Notes for {key}, line {i}: prose below the inbox that plan must never touch, \
+                 here to make the file larger than a pipe buffer."
+            )
+        })
+        .collect()
+}
+
+/// A well-formed plan file holding `entries`, ballast included if seeded.
+pub fn render(key: &str, entries: &[&str]) -> String {
+    let template = template(key).unwrap();
+    let lines: Vec<&str> = template.lines().collect();
+    let ballast = ballast(key);
+    let mut out: Vec<&str> = lines[..2].to_vec();
+    out.extend_from_slice(entries);
+    out.extend_from_slice(&lines[2..]);
+    out.extend(ballast.iter().map(String::as_str));
+    out.join("\n") + "\n"
 }
 
 /// A temp file from an atomic write of a plan file: `YYYY-MM-DD.<pid>.tmp`.
@@ -61,11 +111,21 @@ pub fn parse_plan(key: &str, content: &str) -> Result<Vec<String>, String> {
         return Err(format!("missing trailing newline: {}", snippet(content)));
     }
     let lines: Vec<&str> = content.lines().collect();
-    if lines.len() < TEMPLATE_LINES {
+    let ballast = ballast(key);
+    let min = TEMPLATE_LINES + ballast.len();
+    if lines.len() < min {
         return Err(format!(
-            "only {} lines, a plan file has at least {TEMPLATE_LINES}: {}",
+            "only {} lines, this plan file has at least {min}: {}",
             lines.len(),
             snippet(content)
+        ));
+    }
+    let (lines, prose) = lines.split_at(lines.len() - ballast.len());
+    if let Some(i) = (0..prose.len()).find(|&i| prose[i] != ballast[i]) {
+        return Err(format!(
+            "ballast prose line {} changed to {:?}",
+            i + 1,
+            prose[i]
         ));
     }
     let (head, rest) = lines.split_at(2);
@@ -120,7 +180,7 @@ pub fn parse_ls(out: &str) -> Result<BTreeMap<String, usize>, String> {
         };
         let n: usize = n.parse().map_err(|_| bad())?;
         let entries = n
-            .checked_sub(TEMPLATE_LINES)
+            .checked_sub(TEMPLATE_LINES + ballast(key).len())
             .ok_or_else(|| format!("{key}: {n} lines is shorter than the template"))?;
         counts.insert(key.to_string(), entries);
     }
@@ -140,46 +200,53 @@ fn snippet(s: &str) -> String {
     }
 }
 
-/// Build a well-formed plan file. Used by checker tests.
-#[cfg(test)]
-pub fn render_plan(key: &str, entries: &[&str]) -> String {
-    let template = template(key).unwrap();
-    let lines: Vec<&str> = template.lines().collect();
-    let mut out: Vec<&str> = lines[..2].to_vec();
-    out.extend_from_slice(entries);
-    out.extend_from_slice(&lines[2..]);
-    out.join("\n") + "\n"
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Seeded with ballast.
     const K: &str = "2026-02-19";
+    /// Reachable by the clock fault, but not seeded.
+    const BARE: &str = "2026-02-20";
 
     #[test]
     fn template_round_trips() {
-        let empty = render_plan(K, &[]);
+        let empty = render(BARE, &[]);
         assert_eq!(empty.lines().count(), TEMPLATE_LINES);
-        assert_eq!(parse_plan(K, &empty), Ok(vec![]));
-        let full = render_plan(K, &["* jx:c0:1", "jx:c1:1"]);
+        assert_eq!(parse_plan(BARE, &empty), Ok(vec![]));
+        let full = render(BARE, &["* jx:c0:1", "jx:c1:1"]);
         assert_eq!(
-            parse_plan(K, &full),
+            parse_plan(BARE, &full),
             Ok(vec!["* jx:c0:1".into(), "jx:c1:1".into()])
         );
     }
 
     #[test]
+    fn seeded_files_are_bigger_than_a_pipe_buffer() {
+        let full = render(K, &["* jx:c0:1"]);
+        assert!(full.len() > 128 * 1024, "only {} bytes", full.len());
+        // Ballast must be invisible to `search jx:`.
+        assert_eq!(full.to_lowercase().matches(ENTRY_PREFIX).count(), 1);
+        assert_eq!(parse_plan(K, &full), Ok(vec!["* jx:c0:1".into()]));
+        let bare = render(BARE, &["* jx:c0:1"]);
+        assert!(parse_plan(K, &bare).is_err(), "ballast missing");
+        let tampered = full.replace("line 600:", "line 600 (edited):");
+        assert!(parse_plan(K, &tampered).unwrap_err().contains("ballast"));
+    }
+
+    #[test]
     fn rejects_torn_and_mangled_files() {
-        let full = render_plan(K, &["* jx:c0:1"]);
-        assert!(parse_plan(K, &full[..full.len() / 2]).is_err());
-        assert!(parse_plan(K, "").is_err());
+        for key in [K, BARE] {
+            let full = render(key, &["* jx:c0:1"]);
+            assert!(parse_plan(key, &full[..full.len() / 2]).is_err());
+            assert!(parse_plan(key, "").is_err());
+            let doubled = full.replace("* jx:c0:1\n", "* jx:c0:1\n~~~~\n");
+            assert!(parse_plan(key, &doubled).is_err());
+        }
         assert!(
-            parse_plan("2026-02-20", &full).is_err(),
+            parse_plan("2026-02-21", &render(BARE, &[])).is_err(),
             "wrong header date"
         );
-        let doubled = full.replace("* jx:c0:1\n", "* jx:c0:1\n~~~~\n");
-        assert!(parse_plan(K, &doubled).is_err());
     }
 
     #[test]
@@ -189,8 +256,11 @@ mod tests {
         assert_eq!(m[K], vec!["* jx:c0:1", "jx:c1:1"]);
         assert!(parse_search("2026-02-19.plan:5: jx:c1:1\n").is_err());
 
-        let m = parse_ls("2026-02-19  Thu   7 lines\n").unwrap();
+        let m = parse_ls("2026-02-20  Fri   7 lines\n").unwrap();
+        assert_eq!(m[BARE], 2);
+        assert!(parse_ls("2026-02-20  Fri   3 lines\n").is_err());
+        let n = TEMPLATE_LINES + BALLAST_LINES + 2;
+        let m = parse_ls(&format!("2026-02-19  Thu  {n} lines\n")).unwrap();
         assert_eq!(m[K], 2);
-        assert!(parse_ls("2026-02-19  Thu   3 lines\n").is_err());
     }
 }

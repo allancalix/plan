@@ -7,6 +7,11 @@
 //! |                | lock holder stalls every other writer: a hung process.               |
 //! | `pipe`         | for a window, sabotage new processes' stdio: close stdout/stderr     |
 //! |                | before they write (EPIPE), or close/truncate stdin for `log -`.      |
+//! | `hang-stdout`  | for a window, some new reads get a stdout reader that stalls for 3-5s |
+//! |                | before draining: a pager left open. Other callers must not wait.     |
+//! | `slow-stdin`   | for a window, `log -` input arrives in two halves, up to 1s apart.   |
+//! | `abandon`      | for a window, some callers give up after a few ms and walk away,     |
+//! |                | leaving the process running: its write may land much later.        |
 //! | `clock`        | for a window, skew each client's clock by -1/0/+1 days, so clients   |
 //! |                | disagree about what "today" is (midnight rollover).                  |
 //! | `rogue-writer` | rewrite a plan file from a stale copy without taking the lock, like  |
@@ -35,19 +40,35 @@ pub enum Fault {
     Kill,
     Pause,
     Pipe,
+    HangStdout,
+    SlowStdin,
+    Abandon,
     Clock,
     RogueWriter,
 }
 
+const FAULTS: usize = Fault::RogueWriter as usize + 1;
+
 impl Fault {
     /// Faults plan is expected to survive with its guarantees intact.
-    pub const DEFAULT: &[Fault] = &[Fault::Kill, Fault::Pause, Fault::Pipe, Fault::Clock];
+    pub const DEFAULT: &[Fault] = &[
+        Fault::Kill,
+        Fault::Pause,
+        Fault::Pipe,
+        Fault::HangStdout,
+        Fault::SlowStdin,
+        Fault::Abandon,
+        Fault::Clock,
+    ];
 
     pub fn name(self) -> &'static str {
         match self {
             Fault::Kill => "kill",
             Fault::Pause => "pause",
             Fault::Pipe => "pipe",
+            Fault::HangStdout => "hang-stdout",
+            Fault::SlowStdin => "slow-stdin",
+            Fault::Abandon => "abandon",
             Fault::Clock => "clock",
             Fault::RogueWriter => "rogue-writer",
         }
@@ -66,11 +87,15 @@ impl Fault {
                 "kill" => out.push(Fault::Kill),
                 "pause" => out.push(Fault::Pause),
                 "pipe" => out.push(Fault::Pipe),
+                "hang-stdout" => out.push(Fault::HangStdout),
+                "slow-stdin" => out.push(Fault::SlowStdin),
+                "abandon" => out.push(Fault::Abandon),
                 "clock" => out.push(Fault::Clock),
                 "rogue-writer" => out.push(Fault::RogueWriter),
                 other => panic!(
                     "unknown nemesis fault {other:?}; expected a comma-separated list of: \
-                     none, default, all, kill, pause, pipe, clock, rogue-writer"
+                     none, default, all, kill, pause, pipe, hang-stdout, slow-stdin, abandon, clock, \
+                     rogue-writer"
                 ),
             }
         }
@@ -116,7 +141,8 @@ struct Slot {
 pub struct Control {
     slots: Vec<Mutex<Slot>>,
     skew: Vec<AtomicI64>,
-    pipe: AtomicBool,
+    /// Which window faults are currently open, indexed by `Fault as usize`.
+    windows: [AtomicBool; FAULTS],
     stop: AtomicBool,
 }
 
@@ -125,7 +151,7 @@ impl Control {
         Self {
             slots: (0..clients).map(|_| Mutex::default()).collect(),
             skew: (0..clients).map(|_| AtomicI64::new(0)).collect(),
-            pipe: AtomicBool::new(false),
+            windows: Default::default(),
             stop: AtomicBool::new(false),
         }
     }
@@ -171,8 +197,12 @@ impl Control {
         self.skew[client].load(Ordering::SeqCst)
     }
 
-    pub fn pipe_active(&self) -> bool {
-        self.pipe.load(Ordering::SeqCst)
+    pub fn active(&self, fault: Fault) -> bool {
+        self.windows[fault as usize].load(Ordering::SeqCst)
+    }
+
+    fn set_window(&self, fault: Fault, open: bool) {
+        self.windows[fault as usize].store(open, Ordering::SeqCst);
     }
 
     pub fn stopped(&self) -> bool {
@@ -226,11 +256,24 @@ struct Nemesis<'a> {
 impl Nemesis<'_> {
     fn run(&mut self, deadline: Instant) {
         while Instant::now() < deadline {
-            self.sleep_ms(10..150);
+            // Faults are spaced out so they don't mask each other: a caller stuck
+            // behind a hung reader must live long enough (not be killed or
+            // abandoned) to show up as a stall, and the stall check can only blame
+            // plan for time nobody was paused.
+            let gap = match self.fault {
+                Fault::Kill => 100..400,
+                Fault::Pause => 200..1000,
+                Fault::Pipe | Fault::HangStdout | Fault::SlowStdin | Fault::Abandon => 300..1500,
+                Fault::Clock | Fault::RogueWriter => 10..150,
+            };
+            self.sleep_ms(gap);
             match self.fault {
                 Fault::Kill => self.kill(),
                 Fault::Pause => self.pause(),
-                Fault::Pipe => self.pipe(),
+                Fault::Pipe => self.window(Fault::Pipe, 100..600),
+                Fault::HangStdout => self.window(Fault::HangStdout, 300..1500),
+                Fault::SlowStdin => self.window(Fault::SlowStdin, 300..1000),
+                Fault::Abandon => self.window(Fault::Abandon, 300..1000),
                 Fault::Clock => self.clock(),
                 Fault::RogueWriter => self.rogue_write(),
             }
@@ -239,11 +282,16 @@ impl Nemesis<'_> {
     }
 
     fn log(&self, f: F, text: String) {
+        self.log_target(f, text, None);
+    }
+
+    fn log_target(&self, f: F, text: String, target: Option<usize>) {
         self.rec.record(Event {
             process: NEMESIS.into(),
             typ: Type::Info,
             f,
             value: Value::Text(text),
+            target,
             ..Event::default()
         });
     }
@@ -260,7 +308,7 @@ impl Nemesis<'_> {
         if let Some((client, op)) = self.pick_busy()
             && self.ctl.request(client, op, Sig::Kill)
         {
-            self.log(F::Kill, format!("sigkill c{client} (op #{op})"));
+            self.log_target(F::Kill, format!("sigkill c{client} (op #{op})"), Some(op));
         }
     }
 
@@ -271,21 +319,22 @@ impl Nemesis<'_> {
         if !self.ctl.request(client, op, Sig::Stop) {
             return;
         }
-        self.log(F::Pause, format!("sigstop c{client} (op #{op})"));
+        self.log_target(F::Pause, format!("sigstop c{client} (op #{op})"), Some(op));
         self.sleep_ms(50..500);
         // Always resume, even past the deadline; if the op already ended
         // (e.g. the client timed it out), there is nothing left to resume.
         if self.ctl.request(client, op, Sig::Cont) {
-            self.log(F::Resume, format!("sigcont c{client} (op #{op})"));
+            self.log_target(F::Resume, format!("sigcont c{client} (op #{op})"), Some(op));
         }
     }
 
-    fn pipe(&mut self) {
-        self.ctl.pipe.store(true, Ordering::SeqCst);
-        self.log(F::PipeStart, "sabotaging stdio of new processes".into());
-        self.sleep_ms(100..600);
-        self.ctl.pipe.store(false, Ordering::SeqCst);
-        self.log(F::PipeStop, "stdio healed".into());
+    /// Open `fault`'s window for a while; clients consult it when spawning.
+    fn window(&mut self, fault: Fault, ms: Range<u64>) {
+        self.ctl.set_window(fault, true);
+        self.log(F::Start, fault.name().into());
+        self.sleep_ms(ms);
+        self.ctl.set_window(fault, false);
+        self.log(F::Stop, fault.name().into());
     }
 
     fn clock(&mut self) {
@@ -332,7 +381,9 @@ impl Nemesis<'_> {
     }
 
     fn heal(&self) {
-        self.ctl.pipe.store(false, Ordering::SeqCst);
+        for window in &self.ctl.windows {
+            window.store(false, Ordering::SeqCst);
+        }
         self.reset_clocks();
     }
 }
