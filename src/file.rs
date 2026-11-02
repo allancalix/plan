@@ -1,4 +1,3 @@
-use fs4::fs_std::FileExt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::Path;
@@ -23,7 +22,7 @@ pub fn acquire_lock(path: &Path) -> io::Result<LockGuard> {
         .create(true)
         .truncate(false)
         .open(&lock_path)?;
-    lock_file.lock_exclusive()?;
+    lock_file.lock()?;
     Ok(LockGuard { _file: lock_file })
 }
 
