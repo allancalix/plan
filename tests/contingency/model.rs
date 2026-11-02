@@ -181,20 +181,28 @@ pub fn parse_search(out: &str) -> Result<BTreeMap<String, Vec<String>>, String> 
     Ok(files)
 }
 
-/// Parse `plan ls` output: `YYYY-MM-DD  Thu  NN lines`.
-pub fn parse_ls(out: &str) -> Result<BTreeMap<String, usize>, String> {
+/// Parse `plan ..` output: `YYYY-MM-DD  Thu  @~N  K entries`, one line per plan,
+/// newest first. The relative column is blank for dates after today.
+pub fn parse_list(out: &str) -> Result<BTreeMap<String, usize>, String> {
     let mut counts = BTreeMap::new();
+    let mut previous: Option<&str> = None;
     for line in out.lines() {
-        let bad = || format!("unparseable ls line {line:?}");
+        let bad = || format!("unparseable list line {line:?}");
         let parts: Vec<&str> = line.split_whitespace().collect();
-        let [key, _dow, n, "lines"] = parts[..] else {
-            return Err(bad());
+        let (key, n, noun) = match parts[..] {
+            [key, _dow, rel, n, noun] if rel.starts_with('@') => (key, n, noun),
+            [key, _dow, n, noun] => (key, n, noun),
+            _ => return Err(bad()),
         };
         let n: usize = n.parse().map_err(|_| bad())?;
-        let entries = n
-            .checked_sub(TEMPLATE_LINES + ballast(key).len())
-            .ok_or_else(|| format!("{key}: {n} lines is shorter than the template"))?;
-        counts.insert(key.to_string(), entries);
+        if noun != if n == 1 { "entry" } else { "entries" } || date(key).is_none() {
+            return Err(bad());
+        }
+        if previous.is_some_and(|p| p <= key) {
+            return Err(format!("list is not newest first: {previous:?} then {key}"));
+        }
+        previous = Some(key);
+        counts.insert(key.to_string(), n);
     }
     Ok(counts)
 }
@@ -262,17 +270,22 @@ mod tests {
     }
 
     #[test]
-    fn parses_search_and_ls() {
+    fn parses_search_and_list() {
         let out = "2026-02-19.plan:3: * jx:c0:1\n2026-02-19.plan:4: jx:c1:1\n";
         let m = parse_search(out).unwrap();
         assert_eq!(m[K], vec!["* jx:c0:1", "jx:c1:1"]);
         assert!(parse_search("2026-02-19.plan:5: jx:c1:1\n").is_err());
 
-        let m = parse_ls("2026-02-20  Fri   7 lines\n").unwrap();
-        assert_eq!(m[BARE], 2);
-        assert!(parse_ls("2026-02-20  Fri   3 lines\n").is_err());
-        let n = TEMPLATE_LINES + BALLAST_LINES + 2;
-        let m = parse_ls(&format!("2026-02-19  Thu  {n} lines\n")).unwrap();
-        assert_eq!(m[K], 2);
+        let m = parse_list("2026-02-20  Fri       1 entry\n2026-02-19  Thu  @     2 entries\n")
+            .unwrap();
+        assert_eq!((m[BARE], m[K]), (1, 2));
+        assert!(
+            parse_list("2026-02-19  Thu  @  2 entry\n").is_err(),
+            "noun must agree"
+        );
+        assert!(
+            parse_list("2026-02-19  Thu  @  1 entry\n2026-02-20  Fri  1 entry\n").is_err(),
+            "order"
+        );
     }
 }

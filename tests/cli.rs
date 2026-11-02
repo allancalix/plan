@@ -383,3 +383,4 @@ txtar_test!(
 txtar_test!(test_time_ordering, "tests/data/time_ordering.txtar");
 txtar_test!(test_legacy_fences, "tests/data/legacy_fences.txtar");
 txtar_test!(test_message_words, "tests/data/message_words.txtar");
+txtar_test!(test_selectors, "tests/data/selectors.txtar");

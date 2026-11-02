@@ -41,23 +41,6 @@ pub fn get_date(days_ago: u32) -> anyhow::Result<Date> {
         .ok_or_else(|| anyhow::anyhow!("Date calculation is out of bounds (too far in the past)."))
 }
 
-/// Which plan file a command addresses.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Selector {
-    /// Today minus N days: `@`, `@~N`, `today`, `yesterday`, `N days ago`.
-    DaysAgo(u32),
-    /// `@-`: the most recent existing plan file (today's, if it exists).
-    Latest,
-}
-
-/// Parse a selector. `None` means today.
-pub fn parse_selector(arg: Option<&str>) -> anyhow::Result<Selector> {
-    match arg {
-        Some(s) if s.trim() == "@-" => Ok(Selector::Latest),
-        _ => parse_date_opt(arg).map(Selector::DaysAgo),
-    }
-}
-
 pub fn parse_date_opt(arg: Option<&str>) -> anyhow::Result<u32> {
     if let Some(d) = arg {
         let d_lower = d.trim().to_lowercase();

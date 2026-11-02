@@ -5,7 +5,7 @@ mkdir _xdg/plan
 echo "warn_unexpected = true" > _xdg/plan/config
 echo "ignore = *.md" >> _xdg/plan/config
 echo "ignore = notes.txt" >> _xdg/plan/config
-env XDG_CONFIG_HOME=$PLAN_DIR/_xdg plan ls
+env XDG_CONFIG_HOME=$PLAN_DIR/_xdg plan ..
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
@@ -16,6 +16,6 @@ env XDG_CONFIG_HOME=$PLAN_DIR/_xdg plan ls
 -- README.md --
 project readme
 -- cmd_2_stdout.txt --
-2026-02-19  Thu   6 lines
+2026-02-19  Thu  @  1 entry
 -- notes.txt --
 meeting notes

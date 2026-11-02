@@ -20,12 +20,11 @@ plan: Message cannot be empty.
 -- cmd_4_stderr.txt --
 error: unexpected argument '--init' found
 
-  tip: to pass '--init' as a value, use '-- --init'
+  tip: a similar argument exists: '--in'
 
 Usage: plan [OPTIONS] [SELECTOR]
        plan [OPTIONS] [SELECTOR] -m <MESSAGE>
-       plan [OPTIONS] ls
-       plan [OPTIONS] search <QUERY...>
+       plan [OPTIONS] search <QUERY...> [--in <SELECTOR>]
        plan init <DIR>
 
 For more information, try '--help'.
@@ -38,8 +37,7 @@ error: unexpected argument '--last' found
 
 Usage: plan [OPTIONS] [SELECTOR]
        plan [OPTIONS] [SELECTOR] -m <MESSAGE>
-       plan [OPTIONS] ls
-       plan [OPTIONS] search <QUERY...>
+       plan [OPTIONS] search <QUERY...> [--in <SELECTOR>]
        plan init <DIR>
 
 For more information, try '--help'.
@@ -52,8 +50,7 @@ error: unexpected argument '--path' found
 
 Usage: plan [OPTIONS] [SELECTOR]
        plan [OPTIONS] [SELECTOR] -m <MESSAGE>
-       plan [OPTIONS] ls
-       plan [OPTIONS] search <QUERY...>
+       plan [OPTIONS] search <QUERY...> [--in <SELECTOR>]
        plan init <DIR>
 
 For more information, try '--help'.

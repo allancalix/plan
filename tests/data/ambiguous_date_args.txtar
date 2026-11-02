@@ -17,7 +17,7 @@ plan: No plan file for that date: 2026-02-18.plan
 -- cmd_3_exit.txt --
 2
 -- cmd_3_stderr.txt --
-plan: Invalid date format. Use @, @~N, @-, today, yesterday, or 'N days ago'. To log a message, use -m: plan -m "just a message"
+plan: Invalid selector. Use a day (@, @~N, @-, today, yesterday, 'N days ago', 2026-11-01), a set of plans (11-01, 01, 2026-11, 2026), or a range (@~6.., 2026-10..2026-11, ..). To log a message, use -m: plan -m "just a message"
 -- cmd_4_exit.txt --
 2
 -- cmd_4_stderr.txt --

@@ -251,6 +251,13 @@ function M.open(date)
   end
   local stdout, stderr, code = run(args)
   if code ~= 0 then
+    -- A selector that matches several plans: offer them instead of failing.
+    local count = stderr:match('matches (%d+) plans')
+    if count then
+      M.list(args[2])
+      vim.notify(string.format('plan: %s matches %s plans; pick one from the quickfix list', args[2], count), vim.log.levels.INFO)
+      return
+    end
     vim.notify('plan: ' .. vim.trim(stderr), vim.log.levels.ERROR)
     return
   end
@@ -271,27 +278,38 @@ function M.log(text, date)
   end
 end
 
---- List recent plan files in the quickfix list.
-function M.list()
+--- List plan files in the quickfix list, newest first.
+--- @param selector string|nil  Which plans (e.g. "2026-10", "@~6.."); every plan if nil.
+function M.list(selector)
   local plan_dir = get_plan_dir()
   if not plan_dir then
     vim.notify('plan: could not resolve plan directory', vim.log.levels.ERROR)
     return
   end
-  local stdout, stderr, code = run({ 'ls' })
+  if not selector or selector == '' then selector = '..' end
+  local stdout, stderr, code = run({ selector })
   if code ~= 0 then
-    vim.notify('plan: ' .. vim.trim(stderr), vim.log.levels.ERROR)
+    local msg = vim.trim(stderr) ~= '' and vim.trim(stderr) or ('No plans match: ' .. selector)
+    vim.notify('plan: ' .. msg, vim.log.levels.ERROR)
     return
   end
   local items = {}
-  for line in stdout:gmatch('[^\n]+') do
-    local date_str = line:match('^(%d%d%d%d%-%d%d%-%d%d)')
-    if date_str then
-      items[#items + 1] = {
-        filename = plan_dir .. '/' .. date_str .. '.plan',
-        lnum = 1,
-        text = vim.trim(line),
-      }
+  if stdout ~= '' and not stdout:match('^%d%d%d%d%-%d%d%-%d%d ') then
+    -- A selector naming one day (`yesterday`) prints that plan, not a list.
+    local path = vim.trim((run({ '--show-path', selector })))
+    if path ~= '' then
+      items[1] = { filename = path, lnum = 1, text = vim.fn.fnamemodify(path, ':t:r') }
+    end
+  else
+    for line in stdout:gmatch('[^\n]+') do
+      local date_str = line:match('^(%d%d%d%d%-%d%d%-%d%d)')
+      if date_str then
+        items[#items + 1] = {
+          filename = plan_dir .. '/' .. date_str .. '.plan',
+          lnum = 1,
+          text = vim.trim(line),
+        }
+      end
     end
   end
   vim.fn.setqflist(items)

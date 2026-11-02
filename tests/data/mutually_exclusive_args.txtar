@@ -14,7 +14,7 @@ plan: --show-path only works with a selector, e.g. `plan --show-path yesterday`.
 -- cmd_2_exit.txt --
 2
 -- cmd_2_stderr.txt --
-plan: --show-path only works with a selector, e.g. `plan --show-path yesterday`.
+plan: `plan ls` is now `plan ..`, which lists your most recent plans (or a range: `plan @~6..`)
 -- cmd_3_exit.txt --
 2
 -- cmd_3_stderr.txt --
@@ -22,11 +22,11 @@ plan: --show-path only works with a selector, e.g. `plan --show-path yesterday`.
 -- cmd_4_exit.txt --
 2
 -- cmd_4_stderr.txt --
-plan: -m can't be used with `plan ls`.
+plan: `plan ls` is now `plan ..`, which lists your most recent plans (or a range: `plan @~6..`)
 -- cmd_5_exit.txt --
 2
 -- cmd_5_stderr.txt --
-plan: usage: plan ls
+plan: `plan ls` is now `plan ..`, which lists your most recent plans (or a range: `plan @~6..`)
 -- cmd_6_exit.txt --
 2
 -- cmd_6_stderr.txt --

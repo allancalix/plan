@@ -59,7 +59,7 @@ pub enum Kind {
     Show,
     /// `plan search jx:`
     Search,
-    /// `plan ls`
+    /// `plan ..`: the list of every plan, with inbox entry counts.
     Ls,
     /// `plan --show-path [selector]`: creates today's file from the template if missing.
     Create,
@@ -87,7 +87,7 @@ impl Op {
             // Printing is `plan [selector]` with stdout piped, which it always is.
             Kind::Show => selector.into_iter().collect(),
             Kind::Search => vec!["search".into(), ENTRY_PREFIX.into()],
-            Kind::Ls => vec!["ls".into()],
+            Kind::Ls => vec!["..".into()],
             Kind::Create => std::iter::once("--show-path".into())
                 .chain(selector)
                 .collect(),
@@ -537,9 +537,9 @@ fn classify(op: &Op, exit: Option<i32>, stdout: Option<&str>, stderr: &str) -> (
             Ok(files) => (Type::Ok, Value::Entries(files)),
             Err(reason) => (Type::Ok, Value::Malformed(format!("search: {reason}"))),
         },
-        (Kind::Ls, Some(0)) => match model::parse_ls(stdout) {
+        (Kind::Ls, Some(0)) => match model::parse_list(stdout) {
             Ok(counts) => (Type::Ok, Value::Counts(counts)),
-            Err(reason) => (Type::Ok, Value::Malformed(format!("ls: {reason}"))),
+            Err(reason) => (Type::Ok, Value::Malformed(format!("list: {reason}"))),
         },
         (Kind::Show | Kind::Search | Kind::Ls, _) => (Type::Fail, Value::None),
     }

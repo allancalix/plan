@@ -3,7 +3,7 @@ echo "finder metadata" > .DS_Store
 echo "windows thumb" > Thumbs.db
 echo "vim swap" > .notes.swp
 echo "backup" > old~
-plan ls
+plan ..
 -- .DS_Store --
 finder metadata
 -- .notes.swp --
@@ -18,6 +18,6 @@ vim swap
 -- Thumbs.db --
 windows thumb
 -- cmd_2_stdout.txt --
-2026-02-19  Thu   6 lines
+2026-02-19  Thu  @  1 entry
 -- old~ --
 backup

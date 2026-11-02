@@ -160,6 +160,18 @@ fn is_tilde_line(line: &str) -> bool {
     !t.is_empty() && t.chars().all(|c| c == '~')
 }
 
+/// The number of entries in the inbox: non-blank lines between its fences.
+pub fn inbox_entries(content: &str) -> usize {
+    let mut lines = content.lines().skip_while(|l| !is_inbox_open(l));
+    if lines.next().is_none() {
+        return 0;
+    }
+    lines
+        .take_while(|l| !is_tilde_line(l))
+        .filter(|l| !l.trim().is_empty())
+        .count()
+}
+
 pub fn is_plan_file(name: &str) -> bool {
     name.ends_with(".plan") && !name.starts_with(".sync-conflict")
 }
@@ -309,17 +321,4 @@ pub fn insert_into_inbox(path: &Path, new_line: &str, guard: &LockGuard) -> io::
 
     let new_content = lines.join("\n") + "\n";
     atomic_write(path, &new_content, guard)
-}
-
-/// Find the most recent plan file from pre-scanned entries.
-pub fn find_latest(entries: &[fs::DirEntry]) -> Option<std::path::PathBuf> {
-    entries
-        .iter()
-        .filter(|e| {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let date_str = &name[..name.len() - 5];
-            jiff::civil::Date::strptime("%Y-%m-%d", date_str).is_ok()
-        })
-        .max_by_key(|e| e.file_name())
-        .map(|e| e.path())
 }

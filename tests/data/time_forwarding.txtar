@@ -2,7 +2,7 @@ plan -m "day 1 note"
 >> forward 2 days
 plan -m "day 3 note"
 >> forward 1 week
-plan ls
+plan ..
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
@@ -18,5 +18,5 @@ plan ls
 
 ---
 -- cmd_3_stdout.txt --
-2026-02-21  Sat   6 lines
-2026-02-19  Thu   6 lines
+2026-02-21  Sat  @~7  1 entry
+2026-02-19  Thu  @~9  1 entry

@@ -3,7 +3,7 @@ plan -m "did the thing"
 >> at 08:15
 plan today -m "earlier, but logged later"
 plan
-plan ls
+plan ..
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
@@ -21,4 +21,4 @@ plan ls
 
 ---
 -- cmd_4_stdout.txt --
-2026-02-19  Thu   7 lines
+2026-02-19  Thu  @  2 entries

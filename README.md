@@ -24,3 +24,4 @@ entries from pipes, and prints a plan when its output is piped:
 plan -m "ship the thing"
 echo "rough note from another command" | plan @- -m -
 plan yesterday | bat
+plan ..        # your 30 most recent plans; `plan 2026-10` for a month

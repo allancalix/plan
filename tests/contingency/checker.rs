@@ -211,7 +211,7 @@ impl Op<'_> {
             F::Create => "show-path",
             F::Read => match self.inv.argv.first().map(String::as_str) {
                 Some("search") => "search",
-                Some("ls") => "ls",
+                Some("..") => "list",
                 _ => "print",
             },
             _ => "?",

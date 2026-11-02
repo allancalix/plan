@@ -1,0 +1,149 @@
+# Plans on a few days, spread over two months and a year boundary
+>> forward -110 days
+plan -m "a november plan"
+>> forward 75 days
+plan -m "mid january"
+>> forward 17 days
+plan -m "first of february"
+>> forward 7 days
+plan -m "the eighth"
+>> forward 11 days
+plan -m "today"
+# A day prints that plan; a set prints the list, newest first
+plan 2026-02-08
+plan ..
+plan 01
+plan 2026-02
+plan @~11..
+plan ..2026-01
+plan 2025..2026-01
+# A set that matches one plan still lists it when piped
+plan 11-01
+# Nothing matches: exit 2, quietly when piped
+! plan 2027
+# -m and --show-path need exactly one plan
+plan 11-01 -m "logged through a unique fragment"
+! plan 01 -m "which one?"
+! plan --show-path 2026-02
+! env PLAN_MOCK_TTY=1 plan 2027
+# search narrowed with --in
+plan search the --in 2026-02
+plan search a --in @~18..@~11
+! plan --in @
+# Malformed selectors
+! plan 13-01
+! plan 2026-02-30
+! plan 11-01..
+! plan 1..2..3
+-- 2025-11-01.plan --
+2025, Nov 01 - Saturday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 a november plan
+00:00 logged through a unique fragment
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- 2026-01-15.plan --
+2026, Jan 15 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 mid january
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- 2026-02-01.plan --
+2026, Feb 01 - Sunday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 first of february
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- 2026-02-08.plan --
+2026, Feb 08 - Sunday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 the eighth
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 today
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_10_stdout.txt --
+2026-02-19  Thu  @     1 entry
+2026-02-08  Sun  @~11  1 entry
+-- cmd_11_stdout.txt --
+2026-01-15  Thu  @~35   1 entry
+2025-11-01  Sat  @~110  1 entry
+-- cmd_12_stdout.txt --
+2026-01-15  Thu  @~35   1 entry
+2025-11-01  Sat  @~110  1 entry
+-- cmd_13_stdout.txt --
+2025-11-01  Sat  @~110  1 entry
+-- cmd_14_exit.txt --
+2
+-- cmd_16_exit.txt --
+2
+-- cmd_16_stderr.txt --
+plan: `01` matches 2 plans, but -m needs exactly one:
+  2026-02-01  Sun  @~18   1 entry
+  2025-11-01  Sat  @~110  2 entries
+-- cmd_17_exit.txt --
+2
+-- cmd_17_stderr.txt --
+plan: `2026-02` matches 3 plans, but --show-path needs exactly one:
+  2026-02-19  Thu  @     1 entry
+  2026-02-08  Sun  @~11  1 entry
+  2026-02-01  Sun  @~18  1 entry
+-- cmd_18_exit.txt --
+2
+-- cmd_18_stderr.txt --
+plan: No plans match `2027`.
+-- cmd_19_stdout.txt --
+2026-02-08.plan:3: 00:00 the eighth
+-- cmd_20_stdout.txt --
+2026-02-08.plan:1: 2026, Feb 08 - Sunday
+2026-02-01.plan:1: 2026, Feb 01 - Sunday
+2026-02-01.plan:3: 00:00 first of february
+-- cmd_21_exit.txt --
+2
+-- cmd_21_stderr.txt --
+plan: --in only works with `plan search`, e.g. `plan search deploy --in @~6..`.
+-- cmd_22_exit.txt --
+2
+-- cmd_22_stderr.txt --
+plan: "13-01" is not a valid date. Use a day (@, @~N, @-, today, yesterday, 'N days ago', 2026-11-01), a set of plans (11-01, 01, 2026-11, 2026), or a range (@~6.., 2026-10..2026-11, ..).
+-- cmd_23_exit.txt --
+2
+-- cmd_23_stderr.txt --
+plan: "2026-02-30" is not a valid date. Use a day (@, @~N, @-, today, yesterday, 'N days ago', 2026-11-01), a set of plans (11-01, 01, 2026-11, 2026), or a range (@~6.., 2026-10..2026-11, ..).
+-- cmd_24_exit.txt --
+2
+-- cmd_24_stderr.txt --
+plan: "11-01" can't bound a range: use a day, a month, or a year.
+-- cmd_25_exit.txt --
+2
+-- cmd_25_stderr.txt --
+plan: "1..2..3" has more than one `..`.
+-- cmd_6_stdout.txt --
+2026, Feb 08 - Sunday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 the eighth
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_7_stdout.txt --
+2026-02-19  Thu  @      1 entry
+2026-02-08  Sun  @~11   1 entry
+2026-02-01  Sun  @~18   1 entry
+2026-01-15  Thu  @~35   1 entry
+2025-11-01  Sat  @~110  1 entry
+-- cmd_8_stdout.txt --
+2026-02-01  Sun  @~18   1 entry
+2025-11-01  Sat  @~110  1 entry
+-- cmd_9_stdout.txt --
+2026-02-19  Thu  @     1 entry
+2026-02-08  Sun  @~11  1 entry
+2026-02-01  Sun  @~18  1 entry

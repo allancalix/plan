@@ -4,7 +4,7 @@
 .\" Redistribution and use in source and binary forms, with or without
 .\" modification, are permitted provided that the above conditions are met.
 .\"
-.Dd November 1, 2026
+.Dd November 2, 2026
 .Dt PLAN 1
 .Os
 .Sh NAME
@@ -21,11 +21,9 @@
 .Fl m Ar message
 .Nm
 .Op Fl -dir Ar directory
-.Cm ls
-.Nm
-.Op Fl -dir Ar directory
 .Cm search
 .Ar query ...
+.Op Fl -in Ar selector
 .Nm
 .Cm init
 .Ar directory
@@ -88,26 +86,24 @@ If the inbox fences are missing, they are reconstructed at the end of the
 file.
 .Sh COMMANDS
 A first word of
-.Cm ls ,
-.Cm search ,
+.Cm search
 or
 .Cm init
 is a command; a message is only ever given with
 .Fl m ,
 so
-.Ql plan -m ls
+.Ql plan -m search
 logs
-.Dq ls .
+.Dq search .
 A selector takes nothing after it; leftover words are rejected with a
 suggestion to quote them.
 .Bl -tag -width Ds
-.It Cm ls
-List up to 30 recent plan files, showing the date, day of week, and
-line count for each.
-Files are listed in reverse chronological order.
-.It Cm search Ar query ...
-Search across all plan files for lines containing
-.Ar query .
+.It Cm search Ar query ... Op Fl -in Ar selector
+Search plan files for lines containing
+.Ar query ,
+newest first; all of them, or those
+.Ar selector
+picks.
 Matching is case-insensitive.
 Output is in the format:
 .Dl filename:line: content
@@ -145,8 +141,10 @@ Print a usage summary and exit.
 .Sh SELECTORS
 A
 .Ar selector
-names the plan file to act on:
-.Bl -tag -width "N days ago" -compact
+names either one day or a set of existing plans.
+.Pp
+One day:
+.Bl -tag -width "2026-11-01" -compact
 .It Ql @
 Today.
 .It Ql today
@@ -162,13 +160,64 @@ is a non-negative integer.
 .Ar N
 days ago, in natural language.
 .It Ql @-
-The most recent existing plan file: today's if it exists, otherwise
-the latest one before it.
+The most recent existing plan: today's if it exists, otherwise the
+latest one before it.
+.It Ql 2026-11-01
+That date.
 .El
 .Pp
-When targeting a past date, the file must already exist;
+A set of existing plans:
+.Bl -tag -width "2026-11-01" -compact
+.It Ql 11-01
+Every plan on November 1, in any year.
+.It Ql 01
+Every plan on the 1st, in any month
+.Pq or Ql 1 .
+.It Ql 2026-11
+Every plan in that month.
+.It Ql 2026
+Every plan in that year.
+.It Ql A..B
+Every plan from
+.Ar A
+through
+.Ar B ,
+inclusive.
+Either end may be left off, so
+.Ql ..
+is every plan and
+.Ql @~6..
+is the last week.
+The ends are days, months, or years; a month or year covers all of it.
+.El
+.Pp
+A day names a plan whether or not it exists: only today's is created on
+demand, and a past or future date must already exist.
+A set matches only existing plans.
+When a set matches exactly one plan, it acts like a day in a terminal.
+Otherwise
 .Nm
-will not create new files for past dates.
+lists the matches, newest first:
+.Bd -literal -offset indent
+2026-11-01  Sun  @     4 entries
+2026-10-28  Wed  @~4   7 entries
+30 of 412 plans. Earlier: plan ..2026-03-13
+.Ed
+.Pp
+In a terminal, the list shows the newest 30 plans, ends with the selector
+for the rest, and highlights the shortest part of each date that selects
+that plan alone: for example
+.Li 28 ,
+.Li 10-28 ,
+or the whole date.
+When piped, the list has every match and no footer, so its output depends
+only on the selector: a set always lists, and a day always prints its plan.
+.Pp
+.Fl m
+and
+.Fl -show-path
+need exactly one plan; a set that matches several is an error that lists
+them.
 .Sh ENVIRONMENT
 .Bl -tag -width "XDG_CONFIG_HOME"
 .It Ev PLAN_DIR
@@ -226,7 +275,8 @@ Success.
 Runtime error
 .Pq e.g. I/O failure, missing editor .
 .It 2
-Usage error or, when printing, the requested plan does not exist.
+Usage error, or nothing matched: the requested plan does not exist, or a
+set selector matched no plans.
 .El
 .Sh EXAMPLES
 Initialize a plan directory:
@@ -252,6 +302,16 @@ Print the plan from three days ago:
 .Pp
 Search all plans for a keyword:
 .Dl $ plan search deploy
+.Pp
+List recent plans, or the plans in October:
+.Dl $ plan ..
+.Dl $ plan 2026-10
+.Pp
+Open the plan from October 28, whichever year it was:
+.Dl $ plan 10-28
+.Pp
+Search the last week's plans:
+.Dl $ plan search deploy --in @~6..
 .Pp
 Print the path of the most recent plan file:
 .Dl $ plan --show-path @-

@@ -40,9 +40,9 @@ hello friday
 
 ---
 -- cmd_1_exit.txt --
-1
+2
 -- cmd_1_stderr.txt --
-Error: No plan files found in $PLAN_DIR
+plan: There are no plans yet.
 -- cmd_6_stdout.txt --
 hello friday
 
