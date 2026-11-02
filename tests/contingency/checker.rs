@@ -39,7 +39,7 @@
 //!   files, and must leave nothing in the plan directory but plan files and
 //!   temp files it will sweep up.
 
-use crate::history::{Event, F, FINAL, NEMESIS, REAPER, Type, Value};
+use crate::history::{Event, F, FINAL, NEMESIS, REAPER, SETUP, Type, Value};
 use crate::model;
 use crate::sandbox::Snapshot;
 use serde::Serialize;
@@ -201,11 +201,21 @@ impl Op<'_> {
             .chain(self.done.into_iter().flat_map(|d| &d.faults));
         all.any(|f| f == name)
     }
+    /// A short name for the kind of command, for stats and outcome rules.
     fn command(&self) -> &str {
-        self.inv
-            .argv
-            .first()
-            .map_or("?", |a| a.trim_start_matches('-'))
+        if self.inv.process == SETUP {
+            return "seed";
+        }
+        match self.inv.f {
+            F::Append => "log",
+            F::Create => "show-path",
+            F::Read => match self.inv.argv.first().map(String::as_str) {
+                Some("search") => "search",
+                Some("ls") => "ls",
+                _ => "print",
+            },
+            _ => "?",
+        }
     }
     fn describe(&self) -> String {
         let mut s = format!(
@@ -362,7 +372,7 @@ impl Checker {
                     "crash",
                     format!("{} panicked: {}", op.describe(), op.error()),
                 ),
-                Some(2) if op.command() == "show" && op.error().is_empty() => {} // missing file
+                Some(2) if op.command() == "print" && op.error().is_empty() => {} // missing file
                 // plan may have written its usage error before we closed the pipe.
                 Some(2) if op.has_fault("stderr-closed") => {}
                 Some(2)
@@ -536,72 +546,226 @@ impl Checker {
                 continue; // final file is malformed; already reported
             }
             let list = finals.get(key).map_or(&[][..], Vec::as_slice);
-            let points = self.positions(key, list, ops);
-            self.check_order(key, list.len(), &points);
+            self.check_key(key, list, ops);
         }
     }
 
-    /// Place each op that touched `key` at its forced position in the
-    /// linearization, reporting reads that no position can explain.
-    fn positions<'o>(
-        &mut self,
-        key: &str,
-        list: &[String],
-        ops: &'o [Op<'o>],
-    ) -> Vec<(usize, &'o Op<'o>)> {
+    /// Check every op that touched `key` against its final inbox, `list`.
+    ///
+    /// Inserting an entry never moves the others, so every state the inbox
+    /// passes through is an ordered subset of the final one, and states only
+    /// grow: each read must be a subsequence of `list`, and the reads must nest.
+    /// The nesting then pins each entry between two *levels*: an entry first
+    /// seen by the reads at level k was committed after level k-1's state, and
+    /// no op that finished before another started may sit at a later level.
+    /// Entries that share a timestamp stay in commit order, which pins down
+    /// their order among themselves too.
+    fn check_key(&mut self, key: &str, list: &[String], ops: &[Op]) {
+        self.check_sorted(key, "the final file", list);
         let mut index: HashMap<&str, usize> = HashMap::new();
         for (i, line) in list.iter().enumerate() {
             index.entry(line).or_insert(i);
         }
-        let mut points = Vec::new();
+
+        // Every well-formed read: the final indices it saw, or just a count.
+        let mut entry_reads: Vec<(&Op, Vec<usize>)> = Vec::new();
+        let mut count_reads: Vec<(&Op, usize)> = Vec::new();
         for op in ops {
-            match op.inv.f {
-                F::Append if op.key() == Some(key) && op.typ() != Type::Fail => {
-                    if let Some(&i) = op.line().and_then(|l| index.get(l)) {
-                        points.push((2 * i + 1, op));
+            if op.inv.f != F::Read || op.typ() != Type::Ok || op.key().is_some_and(|k| k != key) {
+                continue;
+            }
+            match op.value() {
+                Value::Entries(m) => {
+                    let obs = m.get(key).map_or(&[][..], Vec::as_slice);
+                    self.check_sorted(key, &op.describe(), obs);
+                    if let Some(seen) = self.subsequence(key, op, obs, list, &index) {
+                        entry_reads.push((op, seen));
                     }
                 }
-                F::Read if op.typ() == Type::Ok && op.key().is_none_or(|k| k == key) => {
-                    let seen = match op.value() {
-                        Value::Entries(m) => {
-                            let obs = m.get(key).map_or(&[][..], Vec::as_slice);
-                            match prefix_mismatch(obs, list) {
-                                None => Some(obs.len()),
-                                Some(why) => {
-                                    self.anomaly(
-                                        "non-prefix-read",
-                                        format!("{} read {key}: {why}", op.describe()),
-                                    );
-                                    None
-                                }
-                            }
-                        }
-                        Value::Counts(m) => {
-                            let n = m.get(key).copied().unwrap_or(0);
-                            if n > list.len() {
-                                self.anomaly(
-                                    "non-prefix-read",
-                                    format!("{} counted {n} entries in {key}, but only {} were committed", op.describe(), list.len()),
-                                );
-                                None
-                            } else {
-                                Some(n)
-                            }
-                        }
-                        _ => None, // malformed: already reported
-                    };
-                    if let Some(n) = seen {
-                        points.push((2 * n, op));
+                Value::Counts(m) => {
+                    let n = m.get(key).copied().unwrap_or(0);
+                    if n > list.len() {
+                        self.anomaly(
+                            "phantom-read",
+                            format!(
+                                "{} counted {n} entries in {key}, but only {} were ever committed",
+                                op.describe(),
+                                list.len()
+                            ),
+                        );
+                    } else {
+                        count_reads.push((op, n));
                     }
+                }
+                _ => {} // malformed: already reported
+            }
+        }
+
+        // The states reads saw, smallest first, must nest. With the final state
+        // on top, they are the levels.
+        entry_reads.sort_by_key(|(_, seen)| seen.len());
+        let mut levels: Vec<&[usize]> = Vec::new();
+        let mut witness: Vec<&Op> = Vec::new();
+        for (op, seen) in &entry_reads {
+            match levels.last() {
+                Some(prev) if prev.len() == seen.len() && *prev == seen.as_slice() => continue,
+                Some(prev) if prev.len() == seen.len() || !is_subset(prev, seen) => {
+                    let earlier = witness.last().unwrap();
+                    self.anomaly(
+                        "incomparable-reads",
+                        format!(
+                            "in {key}, {} and {} each saw entries the other didn't; no order of commits explains both",
+                            earlier.describe(),
+                            op.describe()
+                        ),
+                    );
+                    return; // levels are meaningless now
                 }
                 _ => {}
             }
+            if !seen.is_empty() {
+                levels.push(seen);
+                witness.push(op);
+            }
         }
-        points
+        let everything: Vec<usize> = (0..list.len()).collect();
+        if levels.last().is_none_or(|top| top.len() < list.len()) {
+            levels.push(&everything);
+        }
+        let sizes: Vec<usize> = levels.iter().map(|l| l.len()).collect();
+        // Level 1 is the smallest non-empty state; level 0 is the empty inbox.
+        let mut level = vec![0; list.len()];
+        for (k, set) in levels.iter().enumerate().rev() {
+            for &i in *set {
+                level[i] = k + 1;
+            }
+        }
+        // `sizes` strictly increases, so a state's size identifies its level.
+        let level_of_size = |n: usize| sizes.partition_point(|&s| s < n);
+
+        let mut points: Vec<(usize, &Op)> = Vec::new();
+        let mut ties: BTreeMap<Option<&str>, Vec<(usize, &Op)>> = BTreeMap::new();
+        for op in ops {
+            if op.inv.f == F::Append
+                && op.key() == Some(key)
+                && op.typ() != Type::Fail
+                && let Some(&i) = op.line().and_then(|l| index.get(l))
+            {
+                points.push((2 * level[i] - 1, op));
+                ties.entry(model::entry_time(&list[i]))
+                    .or_default()
+                    .push((i, op));
+            }
+        }
+        for (op, seen) in &entry_reads {
+            let k = if seen.is_empty() {
+                0
+            } else {
+                level_of_size(seen.len()) + 1
+            };
+            points.push((2 * k, op));
+        }
+        for &(op, n) in &count_reads {
+            // A count that matches no level was taken partway through a level.
+            let k = if n == 0 { 0 } else { level_of_size(n) + 1 };
+            let exact = n == 0 || sizes.get(k - 1) == Some(&n);
+            points.push((if exact { 2 * k } else { 2 * k - 1 }, op));
+        }
+        let describe = |pos: usize| match pos {
+            0 => "an empty inbox".to_string(),
+            p if p % 2 == 0 => format!("a state with {} entries", sizes[p / 2 - 1]),
+            p => format!(
+                "a change committed by the time it held {} entries",
+                sizes[p / 2]
+            ),
+        };
+        self.check_order("linearizability", key, &points, describe);
+
+        // Same-timestamp entries are in commit order, so an entry that became
+        // visible later must come later, and so must one invoked later.
+        for (_, group) in ties.iter_mut() {
+            group.sort_by_key(|(i, _)| *i);
+            for pair in group.windows(2) {
+                let ((i, _), (j, _)) = (pair[0], pair[1]);
+                if level[i] > level[j] {
+                    self.anomaly(
+                        "tie-order",
+                        format!(
+                            "in {key}, {:?} and {:?} share a timestamp, so they must stay in commit order, but the second was visible first",
+                            list[i], list[j]
+                        ),
+                    );
+                }
+            }
+            self.check_order("tie-order", key, group, |i| format!("final position {i}"));
+        }
+    }
+
+    /// The final indices `obs` saw, if it is an ordered subset of `list`.
+    fn subsequence(
+        &mut self,
+        key: &str,
+        op: &Op,
+        obs: &[String],
+        list: &[String],
+        index: &HashMap<&str, usize>,
+    ) -> Option<Vec<usize>> {
+        let mut seen: Vec<usize> = Vec::with_capacity(obs.len());
+        for line in obs {
+            let Some(&i) = index.get(line.as_str()) else {
+                self.anomaly(
+                    "phantom-read",
+                    format!(
+                        "{} saw {line:?} in {key}, which is not in the final state",
+                        op.describe()
+                    ),
+                );
+                return None;
+            };
+            if let Some(&prev) = seen.last()
+                && i <= prev
+            {
+                self.anomaly(
+                    "reordered-read",
+                    format!(
+                        "{} saw {line:?} after {:?} in {key}, but the final file has them the other way round",
+                        op.describe(),
+                        list[prev]
+                    ),
+                );
+                return None;
+            }
+            seen.push(i);
+        }
+        Some(seen)
+    }
+
+    /// Timed entries must be in time order (untimed ones are ignored).
+    fn check_sorted(&mut self, key: &str, whose: &str, lines: &[String]) {
+        let mut timed = lines
+            .iter()
+            .filter_map(|l| Some((model::entry_time(l)?, l)));
+        let Some(mut prev) = timed.next() else { return };
+        for cur in timed {
+            if cur.0 < prev.0 {
+                self.anomaly(
+                    "unsorted-inbox",
+                    format!("{whose}: {key} has {:?} before {:?}", prev.1, cur.1),
+                );
+                return;
+            }
+            prev = cur;
+        }
     }
 
     /// If A finished before B started, A's position must not exceed B's.
-    fn check_order(&mut self, key: &str, len: usize, points: &[(usize, &Op)]) {
+    fn check_order(
+        &mut self,
+        kind: &'static str,
+        key: &str,
+        points: &[(usize, &Op)],
+        describe: impl Fn(usize) -> String,
+    ) {
         let mut by_end: Vec<_> = points.iter().collect();
         by_end.sort_by_key(|(_, op)| op.end());
         let mut by_start: Vec<_> = points.iter().collect();
@@ -618,13 +782,13 @@ impl Checker {
                 && a.0 > b.0
             {
                 self.anomaly(
-                    "linearizability",
+                    kind,
                     format!(
-                        "{key}: {} finished before {} started, but it saw/wrote {} while the later op saw/wrote {}",
+                        "{key}: {} finished before {} started, but is ordered after it ({} vs {})",
                         a.1.describe(),
                         b.1.describe(),
-                        describe_pos(a.0, len),
-                        describe_pos(b.0, len),
+                        describe(a.0),
+                        describe(b.0),
                     ),
                 );
             }
@@ -679,33 +843,13 @@ fn push(finding: &mut Finding, example: String) {
     }
 }
 
-fn prefix_mismatch(obs: &[String], list: &[String]) -> Option<String> {
-    for (i, line) in obs.iter().enumerate() {
-        match list.get(i) {
-            Some(f) if f == line => {}
-            Some(f) => {
-                return Some(format!(
-                    "entry {i} is {line:?}, but the final order has {f:?} there"
-                ));
-            }
-            None => {
-                return Some(format!(
-                    "saw {} entries but only {} were committed (first extra: {line:?})",
-                    obs.len(),
-                    list.len()
-                ));
-            }
-        }
-    }
-    None
-}
-
-fn describe_pos(pos: usize, len: usize) -> String {
-    if pos % 2 == 1 {
-        format!("entry {} of {len}", pos / 2)
-    } else {
-        format!("the first {} entries", pos / 2)
-    }
+/// Whether sorted `a` is a subset of sorted `b`.
+fn is_subset(a: &[usize], b: &[usize]) -> bool {
+    let mut b = b.iter().peekable();
+    a.iter().all(|x| {
+        while b.next_if(|y| *y < x).is_some() {}
+        b.next_if_eq(&x).is_some()
+    })
 }
 
 #[cfg(test)]
@@ -857,13 +1001,15 @@ mod tests {
     }
 
     #[test]
-    fn detects_reordered_read() {
+    fn detects_untimed_entries_seen_out_of_commit_order() {
+        // Untimed entries are append-only: seeing `b` without `a` means `b` was
+        // committed first, so the final file cannot have `a` before it.
         let r = H::default()
             .append("c0", "a", (0, 10), Type::Ok)
             .append("c1", "b", (0, 10), Type::Ok)
             .show("c2", &["b"], (0, 10))
             .check(&["a", "b"]);
-        assert_eq!(kinds(&r), ["non-prefix-read"]);
+        assert_eq!(kinds(&r), ["tie-order"]);
     }
 
     #[test]
@@ -872,7 +1018,7 @@ mod tests {
             .append("c0", "a", (0, 10), Type::Info)
             .show("c1", &["a"], (0, 10))
             .check(&[]);
-        assert_eq!(kinds(&r), ["non-prefix-read"]);
+        assert_eq!(kinds(&r), ["phantom-read"]);
     }
 
     #[test]
@@ -901,7 +1047,7 @@ mod tests {
             .append("c0", "a", (0, 1), Type::Ok)
             .append("c1", "b", (2, 3), Type::Ok)
             .check(&["b", "a"]);
-        assert_eq!(kinds(&r), ["linearizability"]);
+        assert_eq!(kinds(&r), ["tie-order"]);
     }
 
     #[test]
@@ -989,5 +1135,53 @@ mod tests {
             .show("c1", &[], (2, 3))
             .check(&["a"]);
         assert!(r.valid, "{}", r.summary());
+    }
+
+    #[test]
+    fn late_stamped_entry_may_land_before_seen_ones() {
+        // `a` was stamped earlier but committed later: plan inserts it in time
+        // order, ahead of `b`, which a read had already seen. That's fine.
+        let r = H::default()
+            .append("c0", "10:05 b", (0, 1), Type::Ok)
+            .show("c1", &["10:05 b"], (2, 3))
+            .append("c2", "10:00 a", (4, 5), Type::Ok)
+            .show("c1", &["10:00 a", "10:05 b"], (6, 7))
+            .check(&["10:00 a", "10:05 b"]);
+        assert!(r.valid, "{}", r.summary());
+    }
+
+    #[test]
+    fn detects_same_minute_entries_out_of_commit_order() {
+        let r = H::default()
+            .append("c0", "10:00 a", (0, 1), Type::Ok)
+            .append("c1", "10:00 b", (2, 3), Type::Ok)
+            .check(&["10:00 b", "10:00 a"]);
+        assert_eq!(kinds(&r), ["tie-order"]);
+    }
+
+    #[test]
+    fn detects_reads_and_files_out_of_time_order() {
+        let r = H::default()
+            .append("c0", "10:00 a", (0, 10), Type::Ok)
+            .append("c1", "10:05 b", (0, 10), Type::Ok)
+            .show("c2", &["10:05 b", "10:00 a"], (0, 10))
+            .check(&["10:00 a", "10:05 b"]);
+        assert_eq!(kinds(&r), ["reordered-read", "unsorted-inbox"]);
+        let r = H::default()
+            .append("c0", "10:05 b", (0, 1), Type::Ok)
+            .append("c1", "10:00 a", (2, 3), Type::Ok)
+            .check(&["10:05 b", "10:00 a"]);
+        assert_eq!(kinds(&r), ["unsorted-inbox"]);
+    }
+
+    #[test]
+    fn detects_reads_that_do_not_nest() {
+        let r = H::default()
+            .append("c0", "10:00 a", (0, 10), Type::Ok)
+            .append("c1", "10:05 b", (0, 10), Type::Ok)
+            .show("c2", &["10:00 a"], (0, 10))
+            .show("c3", &["10:05 b"], (0, 10))
+            .check(&["10:00 a", "10:05 b"]);
+        assert_eq!(kinds(&r), ["incomparable-reads"]);
     }
 }

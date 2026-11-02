@@ -17,8 +17,10 @@ The goal is to make it as easy as possible to drop a line into a plan file from
 anywhere in the terminal while taking the tedium out of managing files.
 
 `plan` supports command-line injection into a header section called the inbox,
-and it can read entries from pipes:
+where entries are stamped with the time and kept in time order. It can read
+entries from pipes, and prints a plan when its output is piped:
 
 ```sh
-plan log "ship the thing"
-echo "rough note from another command" | plan jot -
+plan -m "ship the thing"
+echo "rough note from another command" | plan @- -m -
+plan yesterday | bat

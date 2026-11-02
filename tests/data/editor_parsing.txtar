@@ -1,7 +1,9 @@
-# Uses default "cat" fallback for editor from the harness logic wrapper
-plan
-# Test setting an editor with arguments via our new test harness format
-env VISUAL="cat -n" plan
+# With stdout a terminal, plan opens the editor (the harness defaults it to cat)
+env PLAN_MOCK_TTY=1 plan
+# Editors with arguments are split with shell quoting rules
+env PLAN_MOCK_TTY=1 VISUAL="cat -n" plan
+# Piped, plan prints the plan and never runs the editor
+env VISUAL=false plan
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
@@ -20,3 +22,9 @@ env VISUAL="cat -n" plan
      3	~~~~~~~~~~~~~~~~~~~~~~~
      4	
      5	---
+-- cmd_3_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---

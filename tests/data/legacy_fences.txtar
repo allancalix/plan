@@ -1,0 +1,35 @@
+# Older versions sized the inbox fences to the header line. They are still
+# recognised, and rewritten to the fixed fences on the next write.
+echo "2026, Feb 18 - Wednesday" > 2026-02-18.plan
+echo "~~~~~~~~~~inbox~~~~~~~~~" >> 2026-02-18.plan
+echo "08:00 already here" >> 2026-02-18.plan
+echo "~~~~~~~~~~~~~~~~~~~~~~~~" >> 2026-02-18.plan
+echo "" >> 2026-02-18.plan
+echo "---" >> 2026-02-18.plan
+plan yesterday
+>> at 09:00
+plan yesterday -m "fences are rewritten on write"
+plan yesterday
+-- 2026-02-18.plan --
+2026, Feb 18 - Wednesday
+~~~~~~~~~inbox~~~~~~~~~
+08:00 already here
+09:00 fences are rewritten on write
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_1_stdout.txt --
+2026, Feb 18 - Wednesday
+~~~~~~~~~~inbox~~~~~~~~~
+08:00 already here
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_3_stdout.txt --
+2026, Feb 18 - Wednesday
+~~~~~~~~~inbox~~~~~~~~~
+08:00 already here
+09:00 fences are rewritten on write
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---

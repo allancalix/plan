@@ -38,7 +38,7 @@ fn test_concurrent_fuzzer() {
             let mut rng = StdRng::seed_from_u64(thread_seed);
 
             for op_idx in 0..ops_per_thread {
-                let is_task = rng.random_bool(0.7); // 70% tasks, 30% notes using 0.10.0 syntax
+                let from_stdin = rng.random_bool(0.3);
                 let text = format!("thread_{}_op_{}", t_idx, op_idx);
 
                 // In order to use PLAN_MOCK_TIME, wait for assert_cmd to automatically select the local test-compiled binary
@@ -48,13 +48,13 @@ fn test_concurrent_fuzzer() {
                     .env("PLAN_DIR", &plan_dir)
                     .env("PLAN_MOCK_TIME", mock_date);
 
-                if is_task {
-                    command.arg("log").arg(&text);
-                    expected_inserts.push(format!("* {}", text));
+                if from_stdin {
+                    command.arg("-m").arg("-").write_stdin(format!("{text}\n"));
                 } else {
-                    command.arg("jot").arg(&text);
-                    expected_inserts.push(text.clone());
+                    command.arg("-m").arg(&text);
                 }
+                // The mock clock has no time of day, so every entry is stamped 00:00.
+                expected_inserts.push(format!("00:00 {text}"));
 
                 // Random latency to maximize scheduling collisions across OS
                 thread::sleep(Duration::from_millis(rng.random_range(0..10)));
@@ -85,7 +85,7 @@ fn test_concurrent_fuzzer() {
     // Verify every expected line is present EXACTLY once
     let mut actual_lines = HashSet::new();
     for line in content.lines() {
-        if line.starts_with("thread_") || line.starts_with("* thread_") {
+        if line.starts_with("00:00 thread_") {
             // Handle duplicates if any, since our inputs are globally unique per op
             let is_new = actual_lines.insert(line.to_string());
             assert!(

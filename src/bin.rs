@@ -1,13 +1,13 @@
 use anyhow::{Context, Result, bail};
 use plan::config;
-use plan::date;
+use plan::date::{self, Selector};
 use plan::file;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use std::env;
 use std::fs;
-use std::io::{self, Write};
-use std::path::Path;
+use std::io::{self, IsTerminal, Write};
+use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 
 #[derive(Debug)]
@@ -34,7 +34,7 @@ fn silent_exit(code: i32) -> anyhow::Error {
     anyhow::Error::new(PlanError::SilentExit(code))
 }
 
-/// Map a failed write to stdout. A reader that goes away early (`plan show | head`)
+/// Map a failed write to stdout. A reader that goes away early (`plan | head`)
 /// is a normal way for a pipeline to end, so exit quietly instead of panicking.
 fn stdout_err(e: io::Error) -> anyhow::Error {
     if e.kind() == io::ErrorKind::BrokenPipe {
@@ -45,61 +45,111 @@ fn stdout_err(e: io::Error) -> anyhow::Error {
 }
 
 #[derive(Parser, Debug)]
-#[command(version, about = "A standalone tool for writing and managing daily plan files.", long_about = None)]
+#[command(
+    version,
+    about = "A standalone tool for writing and managing daily plan files.",
+    long_about = None,
+    override_usage = "plan [OPTIONS] [SELECTOR]\n       plan [OPTIONS] [SELECTOR] -m <MESSAGE>\n       plan [OPTIONS] ls\n       plan [OPTIONS] search <QUERY...>\n       plan init <DIR>",
+    after_help = "Selectors: @ (today), @~N, @- (most recent plan), today, yesterday, \"N days ago\"\n\nCommands:\n  ls              List recent plan files with dates and line counts\n  search <QUERY>  Search all plan files (case-insensitive substring)\n  init <DIR>      Configure the plan directory, creating it if needed\n\nExamples:\n  plan                            open today's plan in $VISUAL/$EDITOR\n  plan yesterday | bat            print yesterday's plan (printing never creates one)\n  plan -m \"ship the thing\"        log an entry into today's inbox\n  plan yesterday -m \"forgot this\"  log into yesterday's plan\n  echo note | plan @- -m -        log a line from stdin into the most recent plan"
+)]
 struct Cli {
-    /// Initialize a new plan directory and save to config
-    #[arg(long)]
-    init: bool,
-
-    /// Override config with a new directory
+    /// Override the configured plan directory
     #[arg(long, value_name = "DIR")]
     dir: Option<String>,
 
-    /// Relative date: @~N, today, yesterday, "N days ago"
-    #[arg(name = "DATE")]
-    date: Option<String>,
-
-    /// Print the resolved file path to stdout (creates template if needed)
+    /// Print the plan file's path instead of opening it (creates today's if needed)
     #[arg(long)]
-    path: bool,
+    show_path: bool,
 
-    /// Open the most recent plan file chronologically
-    #[arg(long, global = true)]
-    last: bool,
+    /// Log MESSAGE into the selected plan's inbox ('-' reads a line from stdin)
+    #[arg(short, long, value_name = "MESSAGE", allow_hyphen_values = true)]
+    message: Option<String>,
 
-    #[command(subcommand)]
-    command: Option<Commands>,
+    /// A selector (today's plan if omitted), or a command: ls, search, init
+    #[arg(value_name = "SELECTOR")]
+    args: Vec<String>,
 }
 
-#[derive(Subcommand, Debug)]
-enum Commands {
-    /// Insert '* <text>' into today's inbox (reads stdin if '-')
-    Log {
-        text: String,
-        /// Relative date: @~N, today, yesterday, "N days ago"
-        #[arg(name = "DATE")]
-        date: Option<String>,
-    },
-    /// Insert raw note into today's inbox (reads stdin if '-')
-    Jot {
-        text: String,
-        /// Relative date: @~N, today, yesterday, "N days ago"
-        #[arg(name = "DATE")]
-        date: Option<String>,
-    },
-    /// List recent plan files with dates and line counts
+/// What the positional words ask for.
+enum Invocation {
+    Init(String),
     Ls,
-    /// Print a plan file to stdout (exit code 2 if not found)
-    Show {
-        /// Relative date: @~N, today, yesterday, "N days ago"
-        #[arg(name = "DATE")]
-        date: Option<String>,
-    },
-    /// Search across all plan files (substring match, case-insensitive)
-    Search {
-        /// The search query
-        query: String,
-    },
+    Search(String),
+    Plan { selector: Option<String> },
+}
+
+fn parse_invocation(args: &[String], message: Option<&str>) -> Result<Invocation> {
+    let Some((first, rest)) = args.split_first() else {
+        return Ok(Invocation::Plan { selector: None });
+    };
+    let first = first.as_str();
+    if let Some(hint) = removed_command_hint(first) {
+        return Err(usage_err(hint));
+    }
+    let command = match (first, rest) {
+        ("init", [dir]) => Some(Invocation::Init(dir.clone())),
+        ("init", _) => return Err(usage_err("usage: plan init <DIR>")),
+        ("ls", []) => Some(Invocation::Ls),
+        ("ls", _) => return Err(usage_err("usage: plan ls")),
+        ("search", []) => return Err(usage_err("usage: plan search <QUERY>")),
+        ("search", words) => Some(Invocation::Search(words.join(" "))),
+        _ => None,
+    };
+    if let Some(command) = command {
+        if message.is_some() {
+            return Err(usage_err(format!("-m can't be used with `plan {first}`.")));
+        }
+        return Ok(command);
+    }
+    let is_selector = date::parse_selector(Some(first)).is_ok();
+    // A mistyped `@...` selector is a typo, not a message.
+    if !is_selector && first.trim_start().starts_with('@') && !rest.is_empty() {
+        let e = date::parse_selector(Some(first)).unwrap_err();
+        return Err(usage_err(e.to_string()));
+    }
+    // A selector takes nothing after it, so leftover words are most likely an
+    // unquoted message: suggest the quoted form.
+    let quoted = |words: &[String]| {
+        let all: Vec<&str> = message
+            .into_iter()
+            .chain(words.iter().map(String::as_str))
+            .collect();
+        format!("{:?}", all.join(" "))
+    };
+    let error = match (message, is_selector, rest.first()) {
+        (_, true, None) => {
+            return Ok(Invocation::Plan {
+                selector: Some(first.to_string()),
+            });
+        }
+        // `plan yesterday` is fine; `plan ship` is reported by `resolve`.
+        (None, false, None) => {
+            return Ok(Invocation::Plan {
+                selector: Some(first.to_string()),
+            });
+        }
+        // `plan today -m fix the build`
+        (Some(_), true, Some(extra)) => format!(
+            "unexpected argument {extra:?}. To log a message of several words, quote it: plan {first} -m {}",
+            quoted(rest)
+        ),
+        // `plan -m fix the build`: everything left over is message.
+        (Some(_), false, _) => format!(
+            "unexpected argument {first:?}. To log a message of several words, quote it: plan -m {}",
+            quoted(args)
+        ),
+        // `plan yesterday forgot this`
+        (None, true, Some(extra)) => format!(
+            "unexpected argument {extra:?}. To log a message, use -m: plan {first} -m {}",
+            quoted(rest)
+        ),
+        // `plan ship the thing`
+        (None, false, Some(_)) => format!(
+            "{first:?} is not a selector. To log a message, use -m: plan -m {}",
+            quoted(args)
+        ),
+    };
+    Err(usage_err(error))
 }
 
 fn read_stdin_line() -> io::Result<String> {
@@ -109,7 +159,7 @@ fn read_stdin_line() -> io::Result<String> {
     Ok(line.trim().to_string())
 }
 
-fn open_editor(path: &std::path::Path) -> Result<()> {
+fn open_editor(path: &Path) -> Result<()> {
     let editor_env = env::var("VISUAL")
         .or_else(|_| env::var("EDITOR"))
         .unwrap_or_else(|_| "nano".to_string());
@@ -137,23 +187,83 @@ fn open_editor(path: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// Whether stdout is a terminal: `plan` opens the editor there, and prints
+/// the plan when piped. Tests can force either with `PLAN_MOCK_TTY=1|0`.
+fn stdout_is_terminal() -> bool {
+    #[cfg(feature = "test-clock")]
+    if let Ok(mock) = env::var("PLAN_MOCK_TTY") {
+        return mock == "1";
+    }
+    io::stdout().is_terminal()
+}
+
 fn maybe_warn_unexpected(cfg: &config::Config, unexpected: &[String]) {
     if cfg.scan.warn_unexpected {
         file::warn_unexpected_files(unexpected);
     }
 }
 
-fn parse_date_arg_or_error(arg: Option<&str>) -> Result<u32> {
-    date::parse_date_opt(arg).map_err(|e| usage_err(e.to_string()))
+/// Commands that were folded into the bare `plan` form, with what to type now.
+fn removed_command_hint(word: &str) -> Option<&'static str> {
+    match word {
+        "log" | "jot" => {
+            Some("`plan log` is now `plan [selector] -m <message>`, e.g. `plan -m \"ship it\"`")
+        }
+        "show" => Some(
+            "`plan show` is now `plan <selector>` with stdout piped, e.g. `plan yesterday | bat`",
+        ),
+        _ => None,
+    }
 }
 
-fn handle_file_exists(
-    path: &Path,
-    naive_date: chrono::NaiveDate,
+/// A resolved plan file: where it is, and what to do if it doesn't exist.
+struct Target {
+    path: PathBuf,
+    /// The date, when the file may need creating; `None` for `@-`, which only
+    /// ever names a file that exists.
+    date: Option<jiff::civil::Date>,
     days_ago: u32,
-    guard: &file::LockGuard,
-) -> Result<()> {
-    if let Err(e) = date::ensure_file_exists(path, naive_date, days_ago > 0, guard) {
+}
+
+/// `hint`, if given, is what to suggest when the selector doesn't parse.
+fn resolve(
+    selector: Option<&str>,
+    hint: Option<&str>,
+    dir: &Path,
+    latest: Option<PathBuf>,
+) -> Result<Target> {
+    let parsed = date::parse_selector(selector).map_err(|e| match hint {
+        Some(hint) => usage_err(format!("{e} {hint}")),
+        None => usage_err(e.to_string()),
+    })?;
+    match parsed {
+        Selector::Latest => match latest {
+            Some(path) => Ok(Target {
+                path,
+                date: None,
+                days_ago: 0,
+            }),
+            None => bail!("No plan files found in {}", dir.display()),
+        },
+        Selector::DaysAgo(days_ago) => {
+            let naive = date::get_date(days_ago).map_err(|e| usage_err(e.to_string()))?;
+            Ok(Target {
+                path: date::get_plan_path(dir, naive),
+                date: Some(naive),
+                days_ago,
+            })
+        }
+    }
+}
+
+/// Create today's plan from the template if it's missing. Past dates must
+/// already exist: plan never invents history.
+fn ensure_exists(target: &Target, guard: &file::LockGuard) -> Result<()> {
+    let Some(naive) = target.date else {
+        return Ok(());
+    };
+    let path = &target.path;
+    if let Err(e) = date::ensure_file_exists(path, naive, target.days_ago > 0, guard) {
         if e.kind() == io::ErrorKind::NotFound {
             return Err(usage_err(format!(
                 "No plan file for that date: {}",
@@ -168,24 +278,25 @@ fn handle_file_exists(
     Ok(())
 }
 
+fn init(dir: &str) -> Result<()> {
+    let expanded_dir = config::expand_tilde(dir);
+    if !expanded_dir.exists() {
+        fs::create_dir_all(&expanded_dir).context(format!(
+            "Error creating directory {}",
+            expanded_dir.display()
+        ))?;
+    }
+    config::Config::init(dir)?;
+    writeln!(io::stdout(), "Configured plan directory: {}", dir).map_err(stdout_err)?;
+    Ok(())
+}
+
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    let invocation = parse_invocation(&cli.args, cli.message.as_deref())?;
 
-    if cli.init {
-        if let Some(dir) = cli.dir {
-            let expanded_dir = config::expand_tilde(&dir);
-            if !expanded_dir.exists() {
-                fs::create_dir_all(&expanded_dir).context(format!(
-                    "Error creating directory {}",
-                    expanded_dir.display()
-                ))?;
-            }
-            let _cfg = config::Config::init(&dir)?;
-            writeln!(io::stdout(), "Configured plan directory: {}", dir).map_err(stdout_err)?;
-            return Ok(());
-        } else {
-            return Err(usage_err("--init requires --dir=<path>"));
-        }
+    if let Invocation::Init(dir) = &invocation {
+        return init(dir);
     }
 
     let mut cfg = config::Config::load()?;
@@ -198,13 +309,14 @@ fn run() -> Result<()> {
         }
     }
 
-    if cli.path && cli.command.is_some() {
+    let selecting_only = matches!(invocation, Invocation::Plan { .. }) && cli.message.is_none();
+    if cli.show_path && !selecting_only {
         return Err(usage_err(
-            "--path can only be used with the default command.",
+            "--show-path only works with a selector, e.g. `plan --show-path yesterday`.",
         ));
     }
 
-    // Single scan for all commands — warns once, reused by ls/search/--last
+    // Single scan for all commands: warns once, reused by ls/search/@-
     let mut plan_entries = Vec::new();
     if cfg.dir.exists() {
         let scan = file::scan_plan_dir(&cfg.dir, &cfg.scan.ignored_patterns)?;
@@ -212,59 +324,9 @@ fn run() -> Result<()> {
         plan_entries = scan.plan_entries;
     }
 
-    let latest_plan = file::find_latest(&plan_entries);
-
-    match &cli.command {
-        Some(Commands::Log { text: val, date }) | Some(Commands::Jot { text: val, date }) => {
-            let is_task = matches!(cli.command, Some(Commands::Log { .. }));
-            let text = if val == "-" {
-                read_stdin_line()?
-            } else {
-                val.trim().to_string()
-            };
-            if text.is_empty() {
-                return Err(usage_err("Message cannot be empty."));
-            }
-
-            let actual_date = date.as_deref().or(cli.date.as_deref());
-            if actual_date.is_some() && cli.last {
-                return Err(usage_err("Cannot use --last with a specific date."));
-            }
-
-            let (path, target_date, days_ago) = if cli.last {
-                if let Some(p) = latest_plan {
-                    (p, None, None)
-                } else {
-                    bail!("No plan files found in {}", cfg.dir.display());
-                }
-            } else {
-                let days = parse_date_arg_or_error(actual_date)?;
-                let naive = date::get_date(days).map_err(|e| usage_err(e.to_string()))?;
-                (
-                    date::get_plan_path(&cfg.dir, naive),
-                    Some(naive),
-                    Some(days),
-                )
-            };
-
-            let lock = file::acquire_lock(&path)?;
-
-            if let (Some(naive), Some(days)) = (target_date, days_ago) {
-                handle_file_exists(&path, naive, days, &lock)?;
-            }
-
-            let final_text = if is_task {
-                format!("* {}", text)
-            } else {
-                text.to_string()
-            };
-            file::insert_into_inbox(&path, &final_text, &lock)?;
-        }
-        Some(Commands::Ls) => {
-            if cli.last {
-                return Err(usage_err("--last is not supported with the 'ls' command."));
-            }
-
+    match &invocation {
+        Invocation::Init(_) => unreachable!("handled above"),
+        Invocation::Ls => {
             plan_entries.sort_by_key(|e| e.file_name());
             plan_entries.reverse();
 
@@ -272,8 +334,8 @@ fn run() -> Result<()> {
                 let path = entry.path();
                 let name = entry.file_name().to_string_lossy().to_string();
                 let date_str = &name[..name.len() - 5];
-                if let Ok(parsed) = chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    let day_of_week = parsed.format("%a").to_string();
+                if let Ok(parsed) = jiff::civil::Date::strptime("%Y-%m-%d", date_str) {
+                    let day_of_week = parsed.strftime("%a").to_string();
                     let content = fs::read_to_string(&path)?;
                     let lines = content.lines().count();
                     writeln!(
@@ -287,42 +349,7 @@ fn run() -> Result<()> {
                 }
             }
         }
-        Some(Commands::Show { date }) => {
-            let actual_date = date.as_deref().or(cli.date.as_deref());
-            if actual_date.is_some() && cli.last {
-                return Err(usage_err("Cannot use --last with a specific date."));
-            }
-
-            let path = if cli.last {
-                if let Some(p) = latest_plan {
-                    p
-                } else {
-                    bail!("No plan files found in {}", cfg.dir.display());
-                }
-            } else {
-                let days_ago = parse_date_arg_or_error(actual_date)?;
-                let naive_date = date::get_date(days_ago).map_err(|e| usage_err(e.to_string()))?;
-                date::get_plan_path(&cfg.dir, naive_date)
-            };
-
-            if !path.exists() {
-                return Err(silent_exit(2));
-            }
-            let content = {
-                let _lock = file::acquire_shared_lock(&path)?;
-                fs::read_to_string(&path)?
-            };
-            // Print only after releasing the lock: stdout may be a pipe nobody is
-            // reading (`plan show | less`), and every writer would wait on it.
-            write!(io::stdout(), "{}", content).map_err(stdout_err)?;
-        }
-        Some(Commands::Search { query }) => {
-            if cli.last {
-                return Err(usage_err(
-                    "--last is not supported with the 'search' command.",
-                ));
-            }
-
+        Invocation::Search(query) => {
             let q_lower = query.to_lowercase();
             plan_entries.sort_by_key(|e| e.file_name());
             plan_entries.reverse();
@@ -340,35 +367,55 @@ fn run() -> Result<()> {
                 }
             }
         }
-        None => {
-            let actual_date = cli.date.as_deref();
-            if actual_date.is_some() && cli.last {
-                return Err(usage_err("Cannot use --last with a specific date."));
-            }
+        Invocation::Plan { selector } => {
+            let latest = file::find_latest(&plan_entries);
+            // Words that don't start with a selector were most likely meant as a
+            // message; a malformed `@...` selector is just a typo.
+            let hint = (!cli.show_path
+                && selector
+                    .as_deref()
+                    .is_some_and(|s| !s.trim_start().starts_with('@')))
+            .then(|| format!("To log a message, use -m: plan -m {:?}", cli.args.join(" ")));
+            let target = resolve(selector.as_deref(), hint.as_deref(), &cfg.dir, latest)?;
 
-            if cli.last {
-                if let Some(path) = latest_plan {
-                    if cli.path {
-                        writeln!(io::stdout(), "{}", path.display()).map_err(stdout_err)?;
-                    } else {
-                        open_editor(&path)?;
-                    }
+            if let Some(message) = &cli.message {
+                // `plan [selector] -m <message>`: log into the inbox.
+                let text = if message == "-" {
+                    read_stdin_line()?
                 } else {
-                    bail!("No plan files found in {}", cfg.dir.display());
+                    message.trim().to_string()
+                };
+                if text.is_empty() {
+                    return Err(usage_err("Message cannot be empty."));
+                }
+                let lock = file::acquire_lock(&target.path)?;
+                ensure_exists(&target, &lock)?;
+                // Stamp the entry under the lock, so entries committed one after
+                // another are never stamped out of order.
+                let entry = format!("{} {}", date::entry_time(), text);
+                file::insert_into_inbox(&target.path, &entry, &lock)?;
+            } else if cli.show_path || stdout_is_terminal() {
+                {
+                    let lock = file::acquire_lock(&target.path)?;
+                    ensure_exists(&target, &lock)?;
+                }
+                if cli.show_path {
+                    writeln!(io::stdout(), "{}", target.path.display()).map_err(stdout_err)?;
+                } else {
+                    open_editor(&target.path)?;
                 }
             } else {
-                let days_ago = parse_date_arg_or_error(actual_date)?;
-                let naive_date = date::get_date(days_ago).map_err(|e| usage_err(e.to_string()))?;
-                let path = date::get_plan_path(&cfg.dir, naive_date);
-                {
-                    let lock = file::acquire_lock(&path)?;
-                    handle_file_exists(&path, naive_date, days_ago, &lock)?;
+                // Piped (`plan yesterday | bat`): print the plan. Never creates one.
+                if !target.path.exists() {
+                    return Err(silent_exit(2));
                 }
-                if cli.path {
-                    writeln!(io::stdout(), "{}", path.display()).map_err(stdout_err)?;
-                } else {
-                    open_editor(&path)?;
-                }
+                let content = {
+                    let _lock = file::acquire_shared_lock(&target.path)?;
+                    fs::read_to_string(&target.path)?
+                };
+                // Print only after releasing the lock: stdout may be a pipe nobody
+                // is reading (a pager left open), and every writer would wait on it.
+                write!(io::stdout(), "{}", content).map_err(stdout_err)?;
             }
         }
     }

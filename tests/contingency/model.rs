@@ -8,8 +8,8 @@
 //! ```text
 //! 2026, Feb 19 - Thursday      <- header
 //! ~~~~~~~~~inbox~~~~~~~~~      <- inbox open
-//! * jx:c3:1                    <- entries, in commit order
-//! jx:c0:7
+//! 09:41 jx:c3:1               <- entries, in time order
+//! 09:42 jx:c0:7
 //! ~~~~~~~~~~~~~~~~~~~~~~~      <- inbox close
 //!                              <- blank
 //! ---
@@ -18,9 +18,10 @@
 //!
 //! Two of the dates are seeded with ballast prose before the run. It makes those
 //! files bigger than any pipe buffer, so a reader that stops reading really does
-//! block `plan show` mid-write, and `plan` must never change a byte of it.
+//! block a printing `plan` mid-write, and `plan` must never change a byte of it.
 
-use chrono::NaiveDate;
+use jiff::ToSpan;
+use jiff::civil::Date;
 use std::collections::BTreeMap;
 
 pub const KEY_FORMAT: &str = "%Y-%m-%d";
@@ -33,17 +34,28 @@ const FIRST_ENTRY_LINE: usize = 3;
 /// Ballast prose lines in a seeded file (about 140KB).
 const BALLAST_LINES: usize = 1200;
 
-pub fn key(date: NaiveDate) -> String {
-    date.format(KEY_FORMAT).to_string()
+pub fn key(date: Date) -> String {
+    date.strftime(KEY_FORMAT).to_string()
 }
 
 /// The date clients consider "today" when no clock fault is active.
-pub fn base_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, 2, 19).unwrap()
+pub fn base_date() -> Date {
+    jiff::civil::date(2026, 2, 19)
 }
 
-pub fn date(key: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(key, KEY_FORMAT).ok()
+pub fn date(key: &str) -> Option<Date> {
+    Date::strptime(KEY_FORMAT, key).ok()
+}
+
+/// The `HH:MM` an entry starts with, if any. Zero-padded, so it sorts as text.
+pub fn entry_time(line: &str) -> Option<&str> {
+    let stamp = line.get(..5)?;
+    let b = stamp.as_bytes();
+    let shaped = b[..2].iter().all(u8::is_ascii_digit)
+        && b[2] == b':'
+        && b[3..].iter().all(u8::is_ascii_digit)
+        && line.as_bytes().get(5).is_none_or(|&c| c == b' ');
+    shaped.then_some(stamp)
 }
 
 /// Plan files that exist with ballast before the run starts: today and
@@ -51,7 +63,7 @@ pub fn date(key: &str) -> Option<NaiveDate> {
 /// creation and "no plan file" paths still get exercised.
 pub fn seeded_keys() -> Vec<String> {
     let base = base_date();
-    vec![key(base - chrono::Duration::days(1)), key(base)]
+    vec![key(base - 1.day()), key(base)]
 }
 
 fn is_seeded(key: &str) -> bool {

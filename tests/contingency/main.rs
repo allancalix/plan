@@ -133,6 +133,7 @@ fn run(cfg: &Config) -> Outcome {
         reapers: &reapers,
         base_date: model::base_date(),
         timeout: cfg.timeout,
+        start: Instant::now(),
     };
 
     let deadline = Instant::now() + cfg.duration;
@@ -263,9 +264,17 @@ fn detects_rogue_writer() {
     let out = run(&cfg);
     let anomalies: Vec<_> = out.report.anomalies.keys().collect();
     assert!(
-        anomalies
-            .iter()
-            .any(|k| ["lost-write", "linearizability", "non-prefix-read"].contains(k)),
+        anomalies.iter().any(|k| {
+            [
+                "lost-write",
+                "linearizability",
+                "phantom-read",
+                "reordered-read",
+                "incomparable-reads",
+                "tie-order",
+            ]
+            .contains(k)
+        }),
         "expected the rogue writer to cause lost updates, got {anomalies:?}\n{}\nrun kept in {}",
         out.report.summary(),
         out.dir.display()

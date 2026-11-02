@@ -24,7 +24,7 @@ fn test_concurrent_inserts() {
             command
                 .env("PLAN_DIR", &plan_dir)
                 .env("PLAN_MOCK_TIME", mock_date)
-                .arg("log")
+                .arg("-m")
                 .arg(format!("task from thread {}", i));
 
             command.assert().success();
@@ -42,7 +42,7 @@ fn test_concurrent_inserts() {
     let content = fs::read_to_string(&file_path).unwrap();
     let tasks_found = content
         .lines()
-        .filter(|l| l.starts_with("* task from thread "))
+        .filter(|l| l.starts_with("00:00 task from thread "))
         .count();
 
     assert_eq!(

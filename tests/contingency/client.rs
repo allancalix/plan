@@ -14,7 +14,8 @@ use crate::history::{Event, F, Recorder, Type, Value};
 use crate::model::{self, ENTRY_PREFIX};
 use crate::nemesis::{Control, Fault};
 use crate::sandbox::Sandbox;
-use chrono::NaiveDate;
+use jiff::ToSpan;
+use jiff::civil::Date;
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
 use rand::{RngExt, SeedableRng};
@@ -40,25 +41,27 @@ pub struct Ctx<'a> {
     pub rec: &'a Recorder,
     pub ctl: &'a Control,
     pub reapers: &'a Reapers,
-    pub base_date: NaiveDate,
+    pub base_date: Date,
     pub timeout: Duration,
+    /// When the run started; drives the clients' mock clocks.
+    pub start: Instant,
 }
 
 #[derive(Clone, Debug)]
 pub enum Kind {
-    /// `plan log|jot <text|-> [date]`; `line` is what should land in the inbox.
+    /// `plan [selector] -m <text|->`; `line` is what should land in the inbox.
     Append {
         stdin: bool,
         text: String,
         line: String,
     },
-    /// `plan show [date]`
+    /// `plan [selector]` with stdout piped: prints the plan.
     Show,
     /// `plan search jx:`
     Search,
     /// `plan ls`
     Ls,
-    /// `plan --path [date]`: creates the file from the template if missing.
+    /// `plan --show-path [selector]`: creates today's file from the template if missing.
     Create,
 }
 
@@ -71,27 +74,32 @@ pub struct Op {
 }
 
 impl Op {
-    fn new(kind: Kind, verb: &str, mock: NaiveDate, days_ago: u32, date_arg: Option<&str>) -> Self {
-        let mut argv: Vec<String> = match &kind {
-            Kind::Append { stdin, text, .. } => {
-                vec![verb.into(), if *stdin { "-".into() } else { text.clone() }]
-            }
-            Kind::Show => vec!["show".into()],
+    /// `mock` and `at` are the date and `HH:MM` this op's process believes it
+    /// is; `selector` addresses `days_ago` days before `mock`.
+    fn new(kind: Kind, mock: Date, at: &str, days_ago: u32, selector: Option<&str>) -> Self {
+        let selector = selector.map(String::from);
+        let argv: Vec<String> = match &kind {
+            // `plan [selector] -m <message>`
+            Kind::Append { stdin, text, .. } => selector
+                .into_iter()
+                .chain(["-m".into(), if *stdin { "-".into() } else { text.clone() }])
+                .collect(),
+            // Printing is `plan [selector]` with stdout piped, which it always is.
+            Kind::Show => selector.into_iter().collect(),
             Kind::Search => vec!["search".into(), ENTRY_PREFIX.into()],
             Kind::Ls => vec!["ls".into()],
-            Kind::Create => vec!["--path".into()],
+            Kind::Create => std::iter::once("--show-path".into())
+                .chain(selector)
+                .collect(),
         };
         let key = match kind {
             Kind::Search | Kind::Ls => None,
-            _ => {
-                argv.extend(date_arg.map(String::from));
-                Some(model::key(mock - chrono::Duration::days(days_ago.into())))
-            }
+            _ => Some(model::key(mock - i64::from(days_ago).days())),
         };
         Self {
             kind,
             key,
-            mock_date: model::key(mock),
+            mock_date: format!("{}T{at}", model::key(mock)),
             argv,
         }
     }
@@ -157,6 +165,8 @@ pub struct Client<'a> {
     rng: StdRng,
     ctx: &'a Ctx<'a>,
     seq: u64,
+    /// Minutes this client's clock is off by.
+    minute_skew: i64,
 }
 
 /// Everything attached to a running child, so it can be handed to a reaper.
@@ -175,6 +185,7 @@ impl<'a> Client<'a> {
             rng: StdRng::seed_from_u64(seed),
             ctx,
             seq: 0,
+            minute_skew: (seed % 7) as i64 - 3,
         }
     }
 
@@ -185,50 +196,54 @@ impl<'a> Client<'a> {
         }
     }
 
-    /// Quiescent reads after the nemesis has healed: every file via `show`,
-    /// then `search` and `ls` across the directory.
+    /// Quiescent reads after the nemesis has healed: every file via a piped
+    /// `plan`, then `search` and `ls` across the directory.
     pub fn final_reads(&mut self, keys: &BTreeSet<String>) {
         for key in keys {
             if let Some(date) = model::date(key) {
-                self.invoke(Op::new(Kind::Show, "", date, 0, None));
+                self.invoke(Op::new(Kind::Show, date, "00:00", 0, None));
             }
         }
         let base = self.ctx.base_date;
-        self.invoke(Op::new(Kind::Search, "", base, 0, None));
-        self.invoke(Op::new(Kind::Ls, "", base, 0, None));
+        self.invoke(Op::new(Kind::Search, base, "00:00", 0, None));
+        self.invoke(Op::new(Kind::Ls, base, "00:00", 0, None));
+    }
+
+    /// This client's wall clock as `HH:MM`. One real second of the run is a
+    /// minute from 09:00, offset by the client's own skew, so clients disagree
+    /// slightly about the time and plan sees entries stamped out of order.
+    fn clock(&self) -> String {
+        let minute = 9 * 60 + self.ctx.start.elapsed().as_secs() as i64 + self.minute_skew;
+        let minute = minute.clamp(0, 24 * 60 - 1);
+        format!("{:02}:{:02}", minute / 60, minute % 60)
     }
 
     fn generate(&mut self) -> Op {
+        let at = self.clock();
         let rng = &mut self.rng;
-        let mock = self.ctx.base_date + chrono::Duration::days(self.ctx.ctl.skew(self.id));
+        let mock = self.ctx.base_date + self.ctx.ctl.skew(self.id).days();
         let days_ago = if rng.random_bool(0.1) { 1 } else { 0 };
-        let date_arg: Option<&str> = if days_ago == 0 {
-            *[None, None, Some("@"), Some("today")].choose(rng).unwrap()
-        } else {
-            *[Some("@~1"), Some("yesterday"), Some("1 day ago")]
-                .choose(rng)
-                .unwrap()
-        };
         let roll = rng.random_range(0..100);
-        let (kind, verb) = match roll {
+        let selector: Option<&str> = match (days_ago, roll) {
+            (0, _) => *[None, Some("@"), Some("today")].choose(rng).unwrap(),
+            _ => *[Some("@~1"), Some("yesterday"), Some("1 day ago")]
+                .choose(rng)
+                .unwrap(),
+        };
+        let kind = match roll {
             0..55 => {
                 self.seq += 1;
                 let text = format!("{ENTRY_PREFIX}{}:{}", self.name, self.seq);
                 let stdin = rng.random_bool(0.2);
-                if rng.random_bool(0.6) {
-                    let line = format!("* {text}");
-                    (Kind::Append { stdin, text, line }, "log")
-                } else {
-                    let line = text.clone();
-                    (Kind::Append { stdin, text, line }, "jot")
-                }
+                let line = format!("{at} {text}");
+                Kind::Append { stdin, text, line }
             }
-            55..75 => (Kind::Show, ""),
-            75..83 => (Kind::Search, ""),
-            83..91 => (Kind::Ls, ""),
-            _ => (Kind::Create, ""),
+            55..75 => Kind::Show,
+            75..83 => Kind::Search,
+            83..91 => Kind::Ls,
+            _ => Kind::Create,
         };
-        Op::new(kind, verb, mock, days_ago, date_arg)
+        Op::new(kind, mock, &at, days_ago, selector)
     }
 
     fn pick_stdio_fault(&mut self, op: &Op) -> Option<StdioFault> {

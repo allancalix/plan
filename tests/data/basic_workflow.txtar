@@ -1,20 +1,22 @@
-plan log "did the thing"
-plan jot "raw note"
-plan show
+>> at 09:30
+plan -m "did the thing"
+>> at 08:15
+plan today -m "earlier, but logged later"
+plan
 plan ls
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* did the thing
-raw note
+08:15 earlier, but logged later
+09:30 did the thing
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---
 -- cmd_3_stdout.txt --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* did the thing
-raw note
+08:15 earlier, but logged later
+09:30 did the thing
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---

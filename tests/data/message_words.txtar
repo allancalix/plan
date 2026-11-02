@@ -1,0 +1,48 @@
+# The message goes after -m; with no selector it logs into today's plan
+plan -m "ship the thing"
+# Words that look like commands or flags are fine as messages
+plan @ -m ls
+plan -m "search for the bug"
+plan -m "-leading dash"
+# Unquoted words get a suggestion with the quotes in place
+! plan -m fix the build
+! plan yesterday forgot this
+! plan ship the thing
+! plan @~x more
+plan
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 ship the thing
+00:00 ls
+00:00 search for the bug
+00:00 -leading dash
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_5_exit.txt --
+2
+-- cmd_5_stderr.txt --
+plan: unexpected argument "the". To log a message of several words, quote it: plan -m "fix the build"
+-- cmd_6_exit.txt --
+2
+-- cmd_6_stderr.txt --
+plan: unexpected argument "forgot". To log a message, use -m: plan yesterday -m "forgot this"
+-- cmd_7_exit.txt --
+2
+-- cmd_7_stderr.txt --
+plan: "ship" is not a selector. To log a message, use -m: plan -m "ship the thing"
+-- cmd_8_exit.txt --
+2
+-- cmd_8_stderr.txt --
+plan: Invalid relative date '@~x'. Expected unsigned integer.
+-- cmd_9_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 ship the thing
+00:00 ls
+00:00 search for the bug
+00:00 -leading dash
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---

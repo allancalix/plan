@@ -85,7 +85,9 @@ fn run_txtar_test(path: PathBuf) {
     let output_dir = temp.path().join("cmd_output");
     fs::create_dir_all(&plan_dir).unwrap();
     fs::create_dir_all(&output_dir).unwrap();
-    let mut mock_date = chrono::NaiveDate::from_ymd_opt(2026, 2, 19).unwrap();
+    let mut mock_date = jiff::civil::date(2026, 2, 19);
+    // Time of day for new entries; `>> at HH:MM` sets it. Midnight until then.
+    let mut mock_time: Option<String> = None;
 
     // Execute commands
     let mut executed_cmd_index = 1;
@@ -109,8 +111,10 @@ fn run_txtar_test(path: PathBuf) {
                     "week" | "weeks" => amount * 7,
                     unit => panic!("Invalid forward unit: {}", unit),
                 };
-                mock_date += chrono::Duration::days(days);
+                mock_date = mock_date.checked_add(jiff::Span::new().days(days)).unwrap();
             }
+        } else if let Some(at) = cmd_clean.strip_prefix(">> at ") {
+            mock_time = Some(at.trim().to_string());
         } else if cmd_clean.starts_with("env ")
             || cmd_clean.starts_with("plan ")
             || cmd_clean == "plan"
@@ -148,7 +152,13 @@ fn run_txtar_test(path: PathBuf) {
             let mut command = Command::new(plan_bin);
             command
                 .env("PLAN_DIR", &plan_dir)
-                .env("PLAN_MOCK_TIME", mock_date.format("%Y-%m-%d").to_string());
+                .env("PLAN_MOCK_TIME", {
+                    let day = mock_date.strftime("%Y-%m-%d").to_string();
+                    match &mock_time {
+                        Some(at) => format!("{day}T{at}"),
+                        None => day,
+                    }
+                });
 
             let mut has_visual = false;
             let mut has_editor = false;
@@ -370,3 +380,6 @@ txtar_test!(
     test_ignore_config,
     "tests/data/ignore_config.txtar"
 );
+txtar_test!(test_time_ordering, "tests/data/time_ordering.txtar");
+txtar_test!(test_legacy_fences, "tests/data/legacy_fences.txtar");
+txtar_test!(test_message_words, "tests/data/message_words.txtar");

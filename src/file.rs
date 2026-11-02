@@ -129,13 +129,25 @@ impl Drop for TempFileGuard {
     }
 }
 
-/// Build a centered `~~~~~inbox~~~~~` line of the given total width.
-pub fn make_inbox_line(width: usize) -> String {
-    let label = "inbox";
-    let remaining = width.saturating_sub(label.len());
-    let left = remaining / 2;
-    let right = remaining - left;
-    format!("{}inbox{}", "~".repeat(left), "~".repeat(right))
+/// The inbox fences. They are fixed so they are easy to spot and to parse.
+/// Older versions sized them to the header line; those are still recognised
+/// (see [`is_inbox_open`]) and get rewritten to these on the next write.
+pub const INBOX_OPEN: &str = "~~~~~~~~~inbox~~~~~~~~~";
+pub const INBOX_CLOSE: &str = "~~~~~~~~~~~~~~~~~~~~~~~";
+
+/// The `HH:MM` that leads an inbox entry, if it has one.
+fn entry_time(line: &str) -> Option<jiff::civil::Time> {
+    let b = line.as_bytes();
+    let shaped = b.len() >= 5
+        && b[..2].iter().all(u8::is_ascii_digit)
+        && b[2] == b':'
+        && b[3..5].iter().all(u8::is_ascii_digit)
+        && b.get(5).is_none_or(|&c| c == b' ');
+    if !shaped {
+        return None;
+    }
+    let two = |i: usize| ((b[i] - b'0') * 10 + (b[i + 1] - b'0')) as i8;
+    jiff::civil::Time::new(two(0), two(3), 0, 0).ok()
 }
 
 fn is_inbox_open(line: &str) -> bool {
@@ -237,8 +249,12 @@ pub fn warn_unexpected_files(unexpected: &[String]) {
     );
 }
 
-/// Append a line to the inbox in a plan file.
-/// Performs an atomic write to a tempfile, then renames.
+/// Insert a line into the inbox of a plan file, then write it atomically.
+///
+/// The inbox is kept in time order: a line that starts with `HH:MM` goes before
+/// the first entry with a later time (after any with the same time), and a line
+/// without one goes at the end. Entries without a time never move.
+/// If the inbox fences are missing, a new inbox is added at the end of the file.
 pub fn insert_into_inbox(path: &Path, new_line: &str, guard: &LockGuard) -> io::Result<()> {
     let content = fs::read_to_string(path)?;
 
@@ -264,13 +280,16 @@ pub fn insert_into_inbox(path: &Path, new_line: &str, guard: &LockGuard) -> io::
 
     let file_needs_newline = !lines.is_empty() && !lines.last().unwrap().is_empty();
 
-    // Determine width from the first line (header) or use a default
-    let width = lines.first().map_or(21, |l| l.len().max(21));
-
     match (inbox_start, inbox_end) {
-        (Some(_), Some(end_idx)) => {
-            // Standard case: Inbox is present, inject directly before the closing tilde line
-            lines.insert(end_idx, new_line);
+        (Some(start), Some(end)) => {
+            lines[start] = INBOX_OPEN;
+            lines[end] = INBOX_CLOSE;
+            let at = entry_time(new_line)
+                .and_then(|t| {
+                    (start + 1..end).find(|&i| entry_time(lines[i]).is_some_and(|x| x > t))
+                })
+                .unwrap_or(end);
+            lines.insert(at, new_line);
         }
         _ => {
             // Edge case: User manually wiped the inbox entirely.
@@ -278,14 +297,11 @@ pub fn insert_into_inbox(path: &Path, new_line: &str, guard: &LockGuard) -> io::
             if file_needs_newline {
                 lines.push("");
             }
-            // Use a collected String so we can reference it as &str in the lines vec
-            let inbox_open = make_inbox_line(width);
-            let inbox_close = "~".repeat(width);
             let mut new_lines = Vec::with_capacity(lines.len() + 3);
             new_lines.extend_from_slice(&lines);
-            new_lines.push(&inbox_open);
+            new_lines.push(INBOX_OPEN);
             new_lines.push(new_line);
-            new_lines.push(&inbox_close);
+            new_lines.push(INBOX_CLOSE);
             let new_content = new_lines.join("\n") + "\n";
             return atomic_write(path, &new_content, guard);
         }
@@ -302,7 +318,7 @@ pub fn find_latest(entries: &[fs::DirEntry]) -> Option<std::path::PathBuf> {
         .filter(|e| {
             let name = e.file_name().to_string_lossy().into_owned();
             let date_str = &name[..name.len() - 5];
-            chrono::NaiveDate::parse_from_str(date_str, "%Y-%m-%d").is_ok()
+            jiff::civil::Date::strptime("%Y-%m-%d", date_str).is_ok()
         })
         .max_by_key(|e| e.file_name())
         .map(|e| e.path())

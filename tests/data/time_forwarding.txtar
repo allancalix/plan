@@ -1,19 +1,19 @@
-plan log "day 1 note"
+plan -m "day 1 note"
 >> forward 2 days
-plan log "day 3 note"
+plan -m "day 3 note"
 >> forward 1 week
 plan ls
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* day 1 note
+00:00 day 1 note
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---
 -- 2026-02-21.plan --
 2026, Feb 21 - Saturday
 ~~~~~~~~~inbox~~~~~~~~~
-* day 3 note
+00:00 day 3 note
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---

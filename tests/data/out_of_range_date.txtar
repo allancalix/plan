@@ -1,9 +1,9 @@
-plan log "init today file"
-! plan log "huge" @~4294967295
+plan -m "init today file"
+! plan @~4294967295 -m "huge"
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* init today file
+00:00 init today file
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---

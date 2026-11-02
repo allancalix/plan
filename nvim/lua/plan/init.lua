@@ -12,6 +12,7 @@ local hl_rules = {
   { pattern = '^%d+, %a+ %d+ %- %a+$', group = 'Title' },         -- header
   { pattern = '^~+inbox~+$',            group = 'Special' },       -- inbox marker
   { pattern = '^~+$',                    group = 'Special' },       -- tilde line
+  { pattern = '^%d%d:%d%d ',            group = 'planTime', sigil = 5 }, -- entry time
   { pattern = '^%* ',                   group = 'Identifier', sigil = 2 },
   { pattern = '^\\ ',                   group = 'DiagnosticWarn', sigil = 2 },
   { pattern = '^%+ ',                   group = 'DiagnosticOk', sigil = 2 },
@@ -141,6 +142,7 @@ function M.setup(opts)
 
   vim.filetype.add({ extension = { plan = 'plan' } })
   vim.api.nvim_set_hl(0, 'planTimestamp', { link = 'Comment', italic = true, default = true })
+  vim.api.nvim_set_hl(0, 'planTime', { link = 'Number', default = true })
 
   vim.api.nvim_create_autocmd('FileType', {
     pattern = 'plan',
@@ -239,11 +241,11 @@ function M.cancel()
 end
 
 --- Open a plan file in a buffer. Creates the file via the plan binary if needed.
---- @param date string|nil  Date argument (e.g. "@~1", "yesterday", "last") or nil for today.
+--- @param date string|nil  Selector (e.g. "@~1", "yesterday", "@-"; "last" means "@-") or nil for today.
 function M.open(date)
-  local args = { '--path' }
+  local args = { '--show-path' }
   if date == 'last' then
-    args[#args + 1] = '--last'
+    args[#args + 1] = '@-'
   elseif date and date ~= '' then
     args[#args + 1] = date
   end
@@ -257,24 +259,12 @@ function M.open(date)
   vim.cmd(M.config.open_cmd .. ' ' .. vim.fn.fnameescape(path))
 end
 
---- Log a bullet item into the inbox.
---- @param text string  The text to log (will be prefixed with "* ").
---- @param date string|nil  Optional date argument.
+--- Log an entry into the inbox. plan stamps it with the current time.
+--- @param text string  The text to log.
+--- @param date string|nil  Optional selector; today's plan if omitted.
 function M.log(text, date)
-  local args = { 'log', text }
-  if date and date ~= '' then args[#args + 1] = date end
-  local _, stderr, code = run(args)
-  if code ~= 0 then
-    vim.notify('plan: ' .. vim.trim(stderr), vim.log.levels.ERROR)
-  end
-end
-
---- Jot raw text into the inbox.
---- @param text string  The text to jot (inserted as-is).
---- @param date string|nil  Optional date argument.
-function M.jot(text, date)
-  local args = { 'jot', text }
-  if date and date ~= '' then args[#args + 1] = date end
+  local args = { '-m', text }
+  if date and date ~= '' then table.insert(args, 1, date) end
   local _, stderr, code = run(args)
   if code ~= 0 then
     vim.notify('plan: ' .. vim.trim(stderr), vim.log.levels.ERROR)

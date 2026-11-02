@@ -1,31 +1,61 @@
 use crate::file::LockGuard;
-use chrono::{Duration, Local, NaiveDate};
+use jiff::civil::{Date, DateTime};
+use jiff::{Span, Zoned};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-/// Get the date for N days ago. If N = 0, today. Takes injectable mock time into account.
-pub fn get_date_opt(days_ago: u32) -> Option<NaiveDate> {
-    #[cfg(not(feature = "test-clock"))]
-    let today = Local::now().naive_local().date();
-
+/// The current local date and time.
+///
+/// With the `test-clock` feature, `PLAN_MOCK_TIME` overrides it: either a date
+/// (`2026-02-19`, meaning midnight) or a date and time (`2026-02-19T14:32`).
+pub fn now() -> DateTime {
     #[cfg(feature = "test-clock")]
-    let today = {
-        if let Ok(mock_time) = std::env::var("PLAN_MOCK_TIME")
-            && let Ok(parsed) = NaiveDate::parse_from_str(&mock_time, "%Y-%m-%d")
-        {
-            parsed
-        } else {
-            Local::now().naive_local().date()
+    if let Ok(mock) = std::env::var("PLAN_MOCK_TIME") {
+        if let Ok(date) = Date::strptime("%Y-%m-%d", &mock) {
+            return date.at(0, 0, 0, 0);
         }
-    };
-
-    today.checked_sub_signed(Duration::days(days_ago as i64))
+        for format in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"] {
+            if let Ok(at) = DateTime::strptime(format, &mock) {
+                return at;
+            }
+        }
+    }
+    Zoned::now().datetime()
 }
 
-pub fn get_date(days_ago: u32) -> anyhow::Result<NaiveDate> {
+/// The `HH:MM` timestamp that leads a new inbox entry.
+pub fn entry_time() -> String {
+    now().strftime("%H:%M").to_string()
+}
+
+/// Get the date for N days ago. If N = 0, today. Takes injectable mock time into account.
+pub fn get_date_opt(days_ago: u32) -> Option<Date> {
+    // `try_days`, not `days`: huge offsets must be an error, not a panic.
+    let span = Span::new().try_days(days_ago).ok()?;
+    now().date().checked_sub(span).ok()
+}
+
+pub fn get_date(days_ago: u32) -> anyhow::Result<Date> {
     get_date_opt(days_ago)
         .ok_or_else(|| anyhow::anyhow!("Date calculation is out of bounds (too far in the past)."))
+}
+
+/// Which plan file a command addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Selector {
+    /// Today minus N days: `@`, `@~N`, `today`, `yesterday`, `N days ago`.
+    DaysAgo(u32),
+    /// `@-`: the most recent existing plan file (today's, if it exists).
+    Latest,
+}
+
+/// Parse a selector. `None` means today.
+pub fn parse_selector(arg: Option<&str>) -> anyhow::Result<Selector> {
+    match arg {
+        Some(s) if s.trim() == "@-" => Ok(Selector::Latest),
+        _ => parse_date_opt(arg).map(Selector::DaysAgo),
+    }
 }
 
 pub fn parse_date_opt(arg: Option<&str>) -> anyhow::Result<u32> {
@@ -54,7 +84,7 @@ pub fn parse_date_opt(arg: Option<&str>) -> anyhow::Result<u32> {
             })
         } else {
             Err(anyhow::anyhow!(
-                "Invalid date format. Use @, @~N, today, yesterday, or 'N days ago'."
+                "Invalid date format. Use @, @~N, @-, today, yesterday, or 'N days ago'."
             ))
         }
     } else {
@@ -63,20 +93,20 @@ pub fn parse_date_opt(arg: Option<&str>) -> anyhow::Result<u32> {
 }
 
 /// Format the date as a filename: YYYY-MM-DD.plan
-pub fn format_filename(date: NaiveDate) -> String {
-    format!("{}.plan", date.format("%Y-%m-%d"))
+pub fn format_filename(date: Date) -> String {
+    format!("{}.plan", date.strftime("%Y-%m-%d"))
 }
 
 /// Get the absolute path to a plan file
-pub fn get_plan_path(dir: &Path, date: NaiveDate) -> PathBuf {
+pub fn get_plan_path(dir: &Path, date: Date) -> PathBuf {
     dir.join(format_filename(date))
 }
 
 /// Generate the initial content for a new plan file
-pub fn generate_template(date: NaiveDate) -> String {
-    let formatted_date = date.format("%Y, %b %d - %A").to_string();
-    let inbox_line = crate::file::make_inbox_line(formatted_date.len());
-    let close_line = "~".repeat(formatted_date.len());
+pub fn generate_template(date: Date) -> String {
+    let formatted_date = date.strftime("%Y, %b %d - %A").to_string();
+    let inbox_line = crate::file::INBOX_OPEN;
+    let close_line = crate::file::INBOX_CLOSE;
     format!(
         "{formatted_date}
 {inbox_line}
@@ -90,7 +120,7 @@ pub fn generate_template(date: NaiveDate) -> String {
 /// Create the plan file from the template if it doesn't exist yet.
 pub fn ensure_file_exists(
     path: &Path,
-    date: NaiveDate,
+    date: Date,
     is_past: bool,
     guard: &LockGuard,
 ) -> io::Result<()> {

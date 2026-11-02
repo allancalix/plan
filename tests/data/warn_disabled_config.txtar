@@ -1,4 +1,4 @@
-plan log "hello"
+plan -m "hello"
 echo "stray file" > notes.txt
 mkdir _xdg/plan
 echo "warn_unexpected = false" > _xdg/plan/config
@@ -6,7 +6,7 @@ env XDG_CONFIG_HOME=$PLAN_DIR/_xdg plan ls
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* hello
+00:00 hello
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---

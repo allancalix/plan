@@ -1,0 +1,40 @@
+# The inbox is kept in time order, however late an entry is logged
+>> at 14:00
+plan -m "afternoon"
+>> at 09:00
+plan -m "morning, logged late"
+>> at 14:00
+plan -m "afternoon again, after the first"
+>> at 23:59
+plan -m "last thing"
+>> at 00:00
+plan -m "midnight goes first"
+# Entries without a time (typed by hand, or from older versions) stay put
+replace "09:00 morning, logged late" "no time here" 2026-02-19.plan
+>> at 10:00
+plan -m "ten"
+plan
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 midnight goes first
+no time here
+10:00 ten
+14:00 afternoon
+14:00 afternoon again, after the first
+23:59 last thing
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
+-- cmd_7_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 midnight goes first
+no time here
+10:00 ten
+14:00 afternoon
+14:00 afternoon again, after the first
+23:59 last thing
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---

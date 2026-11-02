@@ -1,39 +1,59 @@
-# Open `--last` on an empty directory should fail cleanly
-! plan --last
+# @- on an empty directory fails cleanly
+! plan @-
 # Add a few plan files natively
 echo "hello monday" > 2026-02-14.plan
 echo "hello wednesday" > 2026-02-16.plan
 echo "hello friday" > 2026-02-18.plan
-plan log "monday log" "5 days ago"
-plan jot "wednesday jot" "3 days ago"
-plan log "friday log" yesterday
-# Now actually run the text editor hook (will output CMD shell stdout traces on exit inside integration harness)
-plan --last
+plan "5 days ago" -m "monday log"
+plan "3 days ago" -m "wednesday log"
+plan yesterday -m "friday log"
+# @- is the most recent plan (Feb 18's), since today's doesn't exist yet
+plan @- -m "into the latest"
+env PLAN_MOCK_TTY=1 plan @-
+# Once today's plan exists, @- is today
+plan -m "today"
+plan @-
 -- 2026-02-14.plan --
 hello monday
 
-~~~~~~~~inbox~~~~~~~~
-* monday log
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~inbox~~~~~~~~~
+00:00 monday log
+~~~~~~~~~~~~~~~~~~~~~~~
 -- 2026-02-16.plan --
 hello wednesday
 
-~~~~~~~~inbox~~~~~~~~
-wednesday jot
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~inbox~~~~~~~~~
+00:00 wednesday log
+~~~~~~~~~~~~~~~~~~~~~~~
 -- 2026-02-18.plan --
 hello friday
 
-~~~~~~~~inbox~~~~~~~~
-* friday log
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~inbox~~~~~~~~~
+00:00 friday log
+00:00 into the latest
+~~~~~~~~~~~~~~~~~~~~~~~
+-- 2026-02-19.plan --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 today
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---
 -- cmd_1_exit.txt --
 1
 -- cmd_1_stderr.txt --
 Error: No plan files found in $PLAN_DIR
--- cmd_5_stdout.txt --
+-- cmd_6_stdout.txt --
 hello friday
 
-~~~~~~~~inbox~~~~~~~~
-* friday log
-~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~inbox~~~~~~~~~
+00:00 friday log
+00:00 into the latest
+~~~~~~~~~~~~~~~~~~~~~~~
+-- cmd_8_stdout.txt --
+2026, Feb 19 - Thursday
+~~~~~~~~~inbox~~~~~~~~~
+00:00 today
+~~~~~~~~~~~~~~~~~~~~~~~
+
+---

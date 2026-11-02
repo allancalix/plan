@@ -1,16 +1,37 @@
-# Fails when --last and a DATE are both provided
-! plan log "task" --last @~1
-! plan show today --last
-! plan --last @~1
+# --show-path takes only a selector: not a message, and not a command
+! plan --show-path -m "message"
+! plan --show-path ls
+! plan --show-path search "foo"
+! plan ls -m "x"
+# Commands take exactly their own arguments
+! plan ls extra
+! plan search
+! plan init a b
 -- cmd_1_exit.txt --
 2
 -- cmd_1_stderr.txt --
-plan: Cannot use --last with a specific date.
+plan: --show-path only works with a selector, e.g. `plan --show-path yesterday`.
 -- cmd_2_exit.txt --
 2
 -- cmd_2_stderr.txt --
-plan: Cannot use --last with a specific date.
+plan: --show-path only works with a selector, e.g. `plan --show-path yesterday`.
 -- cmd_3_exit.txt --
 2
 -- cmd_3_stderr.txt --
-plan: Cannot use --last with a specific date.
+plan: --show-path only works with a selector, e.g. `plan --show-path yesterday`.
+-- cmd_4_exit.txt --
+2
+-- cmd_4_stderr.txt --
+plan: -m can't be used with `plan ls`.
+-- cmd_5_exit.txt --
+2
+-- cmd_5_stderr.txt --
+plan: usage: plan ls
+-- cmd_6_exit.txt --
+2
+-- cmd_6_stderr.txt --
+plan: usage: plan search <QUERY>
+-- cmd_7_exit.txt --
+2
+-- cmd_7_stderr.txt --
+plan: usage: plan init <DIR>

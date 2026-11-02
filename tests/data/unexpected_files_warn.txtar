@@ -1,10 +1,10 @@
-plan log "hello"
+plan -m "hello"
 echo "stray file" > notes.txt
 plan ls
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* hello
+00:00 hello
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---

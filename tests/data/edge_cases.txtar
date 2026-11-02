@@ -1,6 +1,6 @@
-! plan show @~-1
-! plan show @~abc
-! plan log ""
+! plan @~-1
+! plan @~abc
+! plan -m ""
 ! plan @~18446744073709551615
 -- cmd_1_exit.txt --
 2

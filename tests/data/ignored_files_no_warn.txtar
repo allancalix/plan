@@ -1,4 +1,4 @@
-plan log "hello"
+plan -m "hello"
 echo "finder metadata" > .DS_Store
 echo "windows thumb" > Thumbs.db
 echo "vim swap" > .notes.swp
@@ -11,7 +11,7 @@ vim swap
 -- 2026-02-19.plan --
 2026, Feb 19 - Thursday
 ~~~~~~~~~inbox~~~~~~~~~
-* hello
+00:00 hello
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 ---

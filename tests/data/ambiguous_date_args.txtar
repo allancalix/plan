@@ -1,13 +1,13 @@
-# Insert into yesterday's plan
-! plan log "yesterday note" @~1
-# Wait... the above is `plan log "..." @~1`... does it work?
-# The global [DATE] is positional, maybe after flags?
-# Let's test `plan @~1 show` directly:
-! plan @~1 show
-! plan show @~1
-! plan @~1 log "also yesterday"
-# And finally test precedence if both are passed (should probably error or just respect one)
-# plan @~1 show @~2
+# Logging into a past date requires its plan file to exist
+! plan @~1 -m "yesterday note"
+# Printing a missing plan exits 2 silently
+! plan yesterday
+# A lone argument must be a selector; a bare message gets a hint
+! plan "just a message"
+# The removed subcommands point at their replacements
+! plan log "old habit"
+! plan jot "old habit"
+! plan show
 -- cmd_1_exit.txt --
 2
 -- cmd_1_stderr.txt --
@@ -16,7 +16,17 @@ plan: No plan file for that date: 2026-02-18.plan
 2
 -- cmd_3_exit.txt --
 2
+-- cmd_3_stderr.txt --
+plan: Invalid date format. Use @, @~N, @-, today, yesterday, or 'N days ago'. To log a message, use -m: plan -m "just a message"
 -- cmd_4_exit.txt --
 2
 -- cmd_4_stderr.txt --
-plan: No plan file for that date: 2026-02-18.plan
+plan: `plan log` is now `plan [selector] -m <message>`, e.g. `plan -m "ship it"`
+-- cmd_5_exit.txt --
+2
+-- cmd_5_stderr.txt --
+plan: `plan log` is now `plan [selector] -m <message>`, e.g. `plan -m "ship it"`
+-- cmd_6_exit.txt --
+2
+-- cmd_6_stderr.txt --
+plan: `plan show` is now `plan <selector>` with stdout piped, e.g. `plan yesterday | bat`
