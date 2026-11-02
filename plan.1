@@ -172,10 +172,21 @@ On first run, if no configuration exists,
 prompts for the directory interactively and writes this file.
 .It Pa YYYY-MM-DD.plan
 Daily plan files stored in the configured directory.
-.It Pa YYYY-MM-DD.lock
-Lock sidecar files used to serialize concurrent access.
-Created adjacent to each plan file.
+.It Pa YYYY-MM-DD.<pid>.tmp
+Temporary files used to replace plan files atomically.
+A file left behind by an interrupted write is removed by the next write
+to the same plan file.
 .El
+.Sh CONCURRENCY
+Concurrent invocations are safe.
+Writers take an exclusive advisory lock
+.Pq Xr flock 2
+on the plan directory, and
+.Cm show
+takes a shared one.
+Every write replaces the plan file with an atomic rename, so readers see
+either the old or the new contents, never a partial file.
+An editor session does not hold the lock.
 .Sh EXIT STATUS
 .Bl -tag -width Ds -compact
 .It 0
@@ -219,8 +230,3 @@ Open the most recent plan file:
 is alpha software
 .Pq v0.1.0-alpha.1 .
 The file format and command-line interface may change in future releases.
-.Pp
-Lock files
-.Pq Pa *.lock
-are not automatically cleaned up after use and may accumulate
-in the plan directory over time.

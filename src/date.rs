@@ -1,8 +1,8 @@
+use crate::file::LockGuard;
 use chrono::{Duration, Local, NaiveDate};
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process;
 
 /// Get the date for N days ago. If N = 0, today. Takes injectable mock time into account.
 pub fn get_date_opt(days_ago: u32) -> Option<NaiveDate> {
@@ -87,8 +87,13 @@ pub fn generate_template(date: NaiveDate) -> String {
     )
 }
 
-/// Retrieve the template or read existing content
-pub fn ensure_file_exists(path: &Path, date: NaiveDate, is_past: bool) -> io::Result<()> {
+/// Create the plan file from the template if it doesn't exist yet.
+pub fn ensure_file_exists(
+    path: &Path,
+    date: NaiveDate,
+    is_past: bool,
+    guard: &LockGuard,
+) -> io::Result<()> {
     if path.exists() {
         return Ok(());
     }
@@ -105,16 +110,5 @@ pub fn ensure_file_exists(path: &Path, date: NaiveDate, is_past: bool) -> io::Re
         fs::create_dir_all(parent)?;
     }
 
-    // Atomic write
-    let tmp_path = path.with_extension(format!("tmp-{}", process::id()));
-    let mut tmp_guard = crate::file::TempFileGuard::new(tmp_path.clone());
-    {
-        let mut file = File::create(&tmp_path)?;
-        file.write_all(template.as_bytes())?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp_path, path)?;
-    tmp_guard.persist();
-
-    Ok(())
+    crate::file::atomic_write(path, &template, guard)
 }

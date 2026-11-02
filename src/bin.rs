@@ -6,7 +6,7 @@ use plan::file;
 use clap::{Parser, Subcommand};
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process::Command as ProcessCommand;
 
@@ -32,6 +32,16 @@ fn usage_err(msg: impl Into<String>) -> anyhow::Error {
 
 fn silent_exit(code: i32) -> anyhow::Error {
     anyhow::Error::new(PlanError::SilentExit(code))
+}
+
+/// Map a failed write to stdout. A reader that goes away early (`plan show | head`)
+/// is a normal way for a pipeline to end, so exit quietly instead of panicking.
+fn stdout_err(e: io::Error) -> anyhow::Error {
+    if e.kind() == io::ErrorKind::BrokenPipe {
+        silent_exit(0)
+    } else {
+        anyhow::Error::new(e).context("Error writing to stdout")
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -137,8 +147,13 @@ fn parse_date_arg_or_error(arg: Option<&str>) -> Result<u32> {
     date::parse_date_opt(arg).map_err(|e| usage_err(e.to_string()))
 }
 
-fn handle_file_exists(path: &Path, naive_date: chrono::NaiveDate, days_ago: u32) -> Result<()> {
-    if let Err(e) = date::ensure_file_exists(path, naive_date, days_ago > 0) {
+fn handle_file_exists(
+    path: &Path,
+    naive_date: chrono::NaiveDate,
+    days_ago: u32,
+    guard: &file::LockGuard,
+) -> Result<()> {
+    if let Err(e) = date::ensure_file_exists(path, naive_date, days_ago > 0, guard) {
         if e.kind() == io::ErrorKind::NotFound {
             return Err(usage_err(format!(
                 "No plan file for that date: {}",
@@ -166,7 +181,7 @@ fn run() -> Result<()> {
                 ))?;
             }
             let _cfg = config::Config::init(&dir)?;
-            println!("Configured plan directory: {}", dir);
+            writeln!(io::stdout(), "Configured plan directory: {}", dir).map_err(stdout_err)?;
             return Ok(());
         } else {
             return Err(usage_err("--init requires --dir=<path>"));
@@ -235,7 +250,7 @@ fn run() -> Result<()> {
             let lock = file::acquire_lock(&path)?;
 
             if let (Some(naive), Some(days)) = (target_date, days_ago) {
-                handle_file_exists(&path, naive, days)?;
+                handle_file_exists(&path, naive, days, &lock)?;
             }
 
             let final_text = if is_task {
@@ -261,7 +276,14 @@ fn run() -> Result<()> {
                     let day_of_week = parsed.format("%a").to_string();
                     let content = fs::read_to_string(&path)?;
                     let lines = content.lines().count();
-                    println!("{}  {}  {:>2} lines", date_str, day_of_week, lines);
+                    writeln!(
+                        io::stdout(),
+                        "{}  {}  {:>2} lines",
+                        date_str,
+                        day_of_week,
+                        lines
+                    )
+                    .map_err(stdout_err)?;
                 }
             }
         }
@@ -288,7 +310,7 @@ fn run() -> Result<()> {
             }
             let _lock = file::acquire_shared_lock(&path)?;
             let content = fs::read_to_string(&path)?;
-            print!("{}", content);
+            write!(io::stdout(), "{}", content).map_err(stdout_err)?;
         }
         Some(Commands::Search { query }) => {
             if cli.last {
@@ -307,7 +329,8 @@ fn run() -> Result<()> {
                 if let Ok(content) = fs::read_to_string(&path) {
                     for (i, line) in content.lines().enumerate() {
                         if line.to_lowercase().contains(&q_lower) {
-                            println!("{}:{}: {}", filename, i + 1, line);
+                            writeln!(io::stdout(), "{}:{}: {}", filename, i + 1, line)
+                                .map_err(stdout_err)?;
                         }
                     }
                 }
@@ -322,7 +345,7 @@ fn run() -> Result<()> {
             if cli.last {
                 if let Some(path) = latest_plan {
                     if cli.path {
-                        println!("{}", path.display());
+                        writeln!(io::stdout(), "{}", path.display()).map_err(stdout_err)?;
                     } else {
                         open_editor(&path)?;
                     }
@@ -334,11 +357,11 @@ fn run() -> Result<()> {
                 let naive_date = date::get_date(days_ago).map_err(|e| usage_err(e.to_string()))?;
                 let path = date::get_plan_path(&cfg.dir, naive_date);
                 {
-                    let _lock = file::acquire_lock(&path)?;
-                    handle_file_exists(&path, naive_date, days_ago)?;
+                    let lock = file::acquire_lock(&path)?;
+                    handle_file_exists(&path, naive_date, days_ago, &lock)?;
                 }
                 if cli.path {
-                    println!("{}", path.display());
+                    writeln!(io::stdout(), "{}", path.display()).map_err(stdout_err)?;
                 } else {
                     open_editor(&path)?;
                 }
@@ -346,6 +369,7 @@ fn run() -> Result<()> {
         }
     }
 
+    io::stdout().flush().map_err(stdout_err)?;
     Ok(())
 }
 
@@ -354,7 +378,7 @@ fn main() {
         if let Some(plan_err) = e.downcast_ref::<PlanError>() {
             match plan_err {
                 PlanError::Usage(msg) => {
-                    eprintln!("plan: {}", msg);
+                    let _ = writeln!(io::stderr(), "plan: {}", msg);
                     std::process::exit(2);
                 }
                 PlanError::SilentExit(code) => {
@@ -362,7 +386,7 @@ fn main() {
                 }
             }
         } else {
-            eprintln!("Error: {:#}", e);
+            let _ = writeln!(io::stderr(), "Error: {:#}", e);
             std::process::exit(1);
         }
     }
